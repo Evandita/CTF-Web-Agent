@@ -12,6 +12,7 @@ from .extractors import (
     find_elements_by_text,
 )
 from .payloads import get_payloads
+from ..config import get_settings
 from ..utils.flag_detector import detect_flag_in_page
 from ..utils.logger import log_action, log_observation, log_error
 from ..utils.hitl import request_human_input
@@ -200,6 +201,11 @@ async def analyze_page_visually() -> str:
     Returns:
         Visual analysis of the page from the VLM.
     """
+    settings = get_settings()
+
+    if not settings.vision_enabled:
+        return "Vision model is disabled. Use get_page_state or list_interactive_elements instead."
+
     browser = get_browser()
 
     if not browser.page:

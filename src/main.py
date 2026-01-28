@@ -78,6 +78,12 @@ Examples:
     )
 
     parser.add_argument(
+        "--no-vision",
+        action="store_true",
+        help="Disable vision model (skip screenshot analysis)",
+    )
+
+    parser.add_argument(
         "--timeout",
         type=int,
         default=None,
@@ -128,6 +134,8 @@ async def main_async(args: argparse.Namespace) -> int:
         settings_updates["headless"] = True
     if args.no_hitl:
         settings_updates["hitl_enabled"] = False
+    if args.no_vision:
+        settings_updates["vision_enabled"] = False
 
     # Update settings only with explicitly provided values
     if settings_updates:
@@ -136,10 +144,11 @@ async def main_async(args: argparse.Namespace) -> int:
     settings = get_settings()
 
     # Display configuration
+    vision_status = f"{settings.ollama_vision_model}" if settings.vision_enabled else "Disabled"
     console.print(Panel(
         f"[bold]Target URL:[/bold] {args.url}\n"
         f"[bold]Text Model:[/bold] {settings.ollama_text_model}\n"
-        f"[bold]Vision Model:[/bold] {settings.ollama_vision_model}\n"
+        f"[bold]Vision Model:[/bold] {vision_status}\n"
         f"[bold]Max Iterations:[/bold] {settings.max_iterations}\n"
         f"[bold]Headless:[/bold] {settings.headless}\n"
         f"[bold]HITL Enabled:[/bold] {settings.hitl_enabled}",

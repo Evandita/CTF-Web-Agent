@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     # Human-in-the-loop settings
     hitl_enabled: bool = True
 
+    # Vision model settings
+    vision_enabled: bool = True
+
 
 # Global settings instance
 _settings: Settings | None = None

@@ -104,13 +104,9 @@ def check_ollama_available() -> bool:
 
         # Check for required models (handle model name variations)
         text_model = settings.ollama_text_model.split(":")[0]
-        vision_model = settings.ollama_vision_model.split(":")[0]
 
         text_model_available = any(
             text_model in model for model in available_models
-        )
-        vision_model_available = any(
-            vision_model in model for model in available_models
         )
 
         if not text_model_available:
@@ -120,12 +116,19 @@ def check_ollama_available() -> bool:
             )
             return False
 
-        if not vision_model_available:
-            log_error(
-                f"Vision model '{settings.ollama_vision_model}' not found. "
-                f"Available models: {available_models}"
+        # Only check vision model if vision is enabled
+        if settings.vision_enabled:
+            vision_model = settings.ollama_vision_model.split(":")[0]
+            vision_model_available = any(
+                vision_model in model for model in available_models
             )
-            return False
+
+            if not vision_model_available:
+                log_error(
+                    f"Vision model '{settings.ollama_vision_model}' not found. "
+                    f"Available models: {available_models}"
+                )
+                return False
 
         return True
 
