@@ -39,24 +39,30 @@ class Settings(BaseSettings):
     viewport_width: int = 1280
     viewport_height: int = 720
 
-    # Flag detection patterns
+    # Flag detection patterns (ordered from most specific/longest to least specific)
+    # IMPORTANT: Longer prefixes must come before shorter ones (e.g., picoCTF before CTF)
     flag_patterns: list[str] = [
-        r"flag\{[^}]+\}",
-        r"FLAG\{[^}]+\}",
-        r"CTF\{[^}]+\}",
-        r"ctf\{[^}]+\}",
+        # Specific CTF platform patterns (longer prefixes first)
         r"picoCTF\{[^}]+\}",
-        r"HTB\{[^}]+\}",
-        r"htb\{[^}]+\}",
-        r"FLAG-[a-zA-Z0-9-]+",
-        r"flag-[a-zA-Z0-9-]+",
-        r"THM\{[^}]+\}",
-        r"thm\{[^}]+\}",
         r"DUCTF\{[^}]+\}",
         r"ductf\{[^}]+\}",
         r"CUCTF\{[^}]+\}",
-        r"google\{[^}]+\}",
         r"GOOGLE\{[^}]+\}",
+        r"google\{[^}]+\}",
+        # Generic patterns
+        r"FLAG\{[^}]+\}",
+        r"flag\{[^}]+\}",
+        r"CTF\{[^}]+\}",
+        r"ctf\{[^}]+\}",
+        r"HTB\{[^}]+\}",
+        r"htb\{[^}]+\}",
+        r"THM\{[^}]+\}",
+        r"thm\{[^}]+\}",
+        # Dash-separated flags
+        r"FLAG-[a-zA-Z0-9-]+",
+        r"flag-[a-zA-Z0-9-]+",
+        # Catch-all pattern for any word followed by {content}
+        r"[a-zA-Z0-9_]+\{[^}]+\}",
     ]
 
     # Human-in-the-loop settings

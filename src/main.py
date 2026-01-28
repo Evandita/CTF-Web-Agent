@@ -108,6 +108,15 @@ Examples:
         help="Directory for log files (default: logs)",
     )
 
+    parser.add_argument(
+        "--flag-pattern",
+        action="append",
+        default=None,
+        help="Custom flag regex pattern (can be used multiple times). "
+             "If provided, these patterns are checked FIRST before defaults. "
+             "Example: --flag-pattern 'myctf\\{[^}]+\\}'",
+    )
+
     return parser.parse_args()
 
 
@@ -143,6 +152,12 @@ async def main_async(args: argparse.Namespace) -> int:
     if args.no_vision:
         settings_updates["vision_enabled"] = False
 
+    # Handle custom flag patterns - prepend to default patterns so they're checked first
+    if args.flag_pattern:
+        current_settings = get_settings()
+        # Custom patterns are checked first, then defaults
+        settings_updates["flag_patterns"] = args.flag_pattern + current_settings.flag_patterns
+
     # Update settings only with explicitly provided values
     if settings_updates:
         update_settings(**settings_updates)
@@ -152,6 +167,9 @@ async def main_async(args: argparse.Namespace) -> int:
     # Display configuration
     vision_status = f"{settings.ollama_vision_model}" if settings.vision_enabled else "Disabled"
     log_file_path = get_log_file_path()
+    custom_patterns_info = ""
+    if args.flag_pattern:
+        custom_patterns_info = f"\n[bold]Custom Flag Patterns:[/bold] {', '.join(args.flag_pattern)}"
     console.print(Panel(
         f"[bold]Target URL:[/bold] {args.url}\n"
         f"[bold]Text Model:[/bold] {settings.ollama_text_model}\n"
@@ -159,7 +177,7 @@ async def main_async(args: argparse.Namespace) -> int:
         f"[bold]Max Iterations:[/bold] {settings.max_iterations}\n"
         f"[bold]Headless:[/bold] {settings.headless}\n"
         f"[bold]HITL Enabled:[/bold] {settings.hitl_enabled}\n"
-        f"[bold]Log File:[/bold] {log_file_path}",
+        f"[bold]Log File:[/bold] {log_file_path}{custom_patterns_info}",
         title="Configuration",
         border_style="blue",
     ))
