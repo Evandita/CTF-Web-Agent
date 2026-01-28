@@ -20,8 +20,10 @@ def get_text_model() -> ChatOllama:
     return ChatOllama(
         model=settings.ollama_text_model,
         base_url=settings.ollama_base_url,
-        temperature=0.1,
+        temperature=0,  # Use 0 for deterministic tool calling
         num_ctx=8192,
+        num_predict=2048,  # Limit response length to avoid truncation
+        timeout=120,  # Increase timeout for slower models
     )
 
 

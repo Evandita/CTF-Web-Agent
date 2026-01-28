@@ -412,7 +412,7 @@ async def try_common_payloads(input_selector: str, payload_type: str) -> str:
 
     Args:
         input_selector: CSS selector for the input field to test.
-        payload_type: Type of payload: 'sqli', 'xss', 'cmdi', 'path_traversal', 'ssti'
+        payload_type: Type of payload: 'sqli', 'xss', 'cmdi', 'path_traversal', 'ssti', 'lfi', 'auth_bypass'
 
     Returns:
         Results of testing each payload.
@@ -424,12 +424,12 @@ async def try_common_payloads(input_selector: str, payload_type: str) -> str:
 
     payloads = get_payloads(payload_type)
     if not payloads:
-        return f"Unknown payload type: {payload_type}. Available: sqli, xss, cmdi, path_traversal, ssti"
+        return f"Unknown payload type: {payload_type}. Available: sqli, xss, cmdi, path_traversal, ssti, lfi, auth_bypass"
 
-    results = [f"Testing {payload_type} payloads on {input_selector}:\n"]
+    results = [f"Testing {len(payloads)} {payload_type} payloads on {input_selector}:\n"]
 
-    # Test first 5 payloads
-    for payload in payloads[:5]:
+    # Test all payloads
+    for i, payload in enumerate(payloads, 1):
         if isinstance(payload, tuple):
             payload = payload[0]  # Use first value if tuple
 
@@ -448,11 +448,11 @@ async def try_common_payloads(input_selector: str, payload_type: str) -> str:
             flag = detect_flag(html)
 
             url = browser.get_current_url()
-            result = f"  Payload: {str(payload)[:50]}"
-            result += f"\n  URL after: {url}"
+            result = f"  [{i}/{len(payloads)}] Payload: {str(payload)[:50]}"
+            result += f"\n       URL after: {url}"
 
             if flag:
-                result += f"\n  FLAG FOUND: {flag}"
+                result += f"\n       FLAG FOUND: {flag}"
                 results.append(result)
                 return "\n".join(results) + f"\n\n*** FLAG FOUND: {flag} ***"
 
@@ -463,7 +463,7 @@ async def try_common_payloads(input_selector: str, payload_type: str) -> str:
             await browser.page.wait_for_timeout(500)
 
         except Exception as e:
-            results.append(f"  Payload {str(payload)[:30]}... Error: {e}")
+            results.append(f"  [{i}/{len(payloads)}] Payload {str(payload)[:30]}... Error: {e}")
 
     return "\n".join(results)
 
