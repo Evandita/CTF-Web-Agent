@@ -110,7 +110,7 @@ def add_action_to_history(
         "iteration": state["iteration"],
         "action": action,
         "args": args,
-        "result": result[:500],  # Truncate long results
+        "result": result[:1000],  # Store more of result for context
         "success": success,
     })
 
@@ -141,6 +141,14 @@ def format_action_history(state: AgentState, last_n: int = 10) -> str:
         status = "SUCCESS" if action["success"] else "FAILED"
         args_str = ", ".join(f"{k}={repr(v)[:30]}" for k, v in action["args"].items())
         lines.append(f"  [{status}] {action['action']}({args_str})")
+        # Include result summary to help LLM understand what happened
+        result = action.get("result", "")
+        if result:
+            # Show first 300 chars of result
+            result_preview = result[:300].replace('\n', ' ')
+            if len(result) > 300:
+                result_preview += "..."
+            lines.append(f"    Result: {result_preview}")
 
     return "\n".join(lines)
 

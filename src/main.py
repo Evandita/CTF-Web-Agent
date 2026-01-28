@@ -12,7 +12,7 @@ from .config import get_settings, update_settings
 from .models.ollama_client import check_ollama_available
 from .browser.controller import BrowserController
 from .agent.orchestrator import CTFOrchestrator
-from .utils.logger import setup_logging, log_error, log_flag_found, log_action
+from .utils.logger import setup_logging, setup_file_logging, get_log_file_path, log_error, log_flag_found, log_action
 
 console = Console()
 
@@ -102,6 +102,12 @@ Examples:
         help="Enable verbose logging",
     )
 
+    parser.add_argument(
+        "--log-dir",
+        default="logs",
+        help="Directory for log files (default: logs)",
+    )
+
     return parser.parse_args()
 
 
@@ -145,17 +151,22 @@ async def main_async(args: argparse.Namespace) -> int:
 
     # Display configuration
     vision_status = f"{settings.ollama_vision_model}" if settings.vision_enabled else "Disabled"
+    log_file_path = get_log_file_path()
     console.print(Panel(
         f"[bold]Target URL:[/bold] {args.url}\n"
         f"[bold]Text Model:[/bold] {settings.ollama_text_model}\n"
         f"[bold]Vision Model:[/bold] {vision_status}\n"
         f"[bold]Max Iterations:[/bold] {settings.max_iterations}\n"
         f"[bold]Headless:[/bold] {settings.headless}\n"
-        f"[bold]HITL Enabled:[/bold] {settings.hitl_enabled}",
+        f"[bold]HITL Enabled:[/bold] {settings.hitl_enabled}\n"
+        f"[bold]Log File:[/bold] {log_file_path}",
         title="Configuration",
         border_style="blue",
     ))
     console.print()
+
+    # Log configuration to file
+    log_action("Configuration", f"Target: {args.url}, Model: {settings.ollama_text_model}")
 
     # Check Ollama availability
     console.print("[cyan]Checking Ollama availability...[/cyan]")
@@ -236,6 +247,10 @@ def main() -> None:
     import logging
     level = logging.DEBUG if args.verbose else logging.INFO
     setup_logging(level)
+
+    # Setup file logging (always enabled for debugging)
+    log_file = setup_file_logging(args.log_dir)
+    console.print(f"[dim]Log file: {log_file}[/dim]\n")
 
     # Run async main
     exit_code = asyncio.run(main_async(args))

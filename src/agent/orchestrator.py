@@ -334,7 +334,7 @@ class CTFOrchestrator:
             if isinstance(msg, ToolMessage):
                 result = msg.content
 
-                log_tool_result(msg.name, str(result)[:200])
+                log_tool_result(msg.name, str(result)[:800])
 
                 # Check for errors
                 is_error = "error" in str(result).lower()
@@ -347,7 +347,7 @@ class CTFOrchestrator:
                     "iteration": state["iteration"],
                     "action": msg.name,
                     "args": {},  # Args not easily accessible here
-                    "result": str(result)[:500],
+                    "result": str(result)[:1000],
                     "success": not is_error,
                 })
 

