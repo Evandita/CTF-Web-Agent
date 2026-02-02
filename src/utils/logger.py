@@ -144,15 +144,17 @@ def log_observation(observation: str) -> None:
 
 def log_thinking(thought: str) -> None:
     """Log agent reasoning/thinking (yellow panel)."""
+    # Truncate for console readability
+    display_thought = thought[:500] + "..." if len(thought) > 500 else thought
     panel = Panel(
-        thought,
+        display_thought,
         title="[bold yellow]Thinking[/bold yellow]",
         border_style="yellow",
         expand=False,
     )
     console.print(panel)
 
-    # Log to file (untruncated)
+    # Log FULL content to file (untruncated)
     _log_to_file("INFO", "THINKING", thought)
 
 
@@ -176,15 +178,17 @@ def log_flag_found(flag: str) -> None:
 
 def log_error(error: str) -> None:
     """Log an error (red panel)."""
+    # Truncate for console readability
+    display_error = error[:500] + "..." if len(error) > 500 else error
     panel = Panel(
-        error,
+        display_error,
         title="[bold red]Error[/bold red]",
         border_style="red",
         expand=False,
     )
     console.print(panel)
 
-    # Log to file (untruncated)
+    # Log FULL content to file (untruncated)
     _log_to_file("ERROR", "ERROR", error)
 
 

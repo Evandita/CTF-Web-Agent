@@ -29,6 +29,56 @@ from ..utils.logger import (
 from ..config import get_settings
 
 
+def _extract_json_with_nested_braces(content: str) -> str | None:
+    """
+    Extract a JSON object from text, handling nested braces.
+
+    This is needed because SSTI payloads contain {{ and }} which break simple regex.
+    """
+    # Find the first { that starts a JSON-like structure
+    start_patterns = [
+        '{"name"',  # Tool call JSON
+        "{'name'",  # Single quote variant
+    ]
+
+    start_idx = -1
+    for pattern in start_patterns:
+        idx = content.find(pattern)
+        if idx != -1 and (start_idx == -1 or idx < start_idx):
+            start_idx = idx
+
+    if start_idx == -1:
+        return None
+
+    # Count braces to find matching end
+    brace_count = 0
+    in_string = False
+    escape_next = False
+
+    for i, char in enumerate(content[start_idx:], start_idx):
+        if escape_next:
+            escape_next = False
+            continue
+
+        if char == '\\':
+            escape_next = True
+            continue
+
+        if char == '"' and not escape_next:
+            in_string = not in_string
+            continue
+
+        if not in_string:
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    return content[start_idx:i+1]
+
+    return None
+
+
 def _parse_tool_call_from_text(content: str, available_tools: list) -> dict | None:
     """
     Attempt to parse a tool call from LLM text output.
@@ -42,13 +92,6 @@ def _parse_tool_call_from_text(content: str, available_tools: list) -> dict | No
     # Get tool names
     tool_names = [t.name for t in available_tools]
 
-    # Look for JSON blocks in the content
-    json_patterns = [
-        r'\{[^{}]*"?(\w+)"?\s*:\s*[^{}]+\}',  # Simple JSON object
-        r'```json\s*(\{.*?\})\s*```',  # JSON in code block
-        r'```\s*(\{.*?\})\s*```',  # JSON in generic code block
-    ]
-
     # Try to find tool name mentioned in content
     mentioned_tool = None
     for tool_name in tool_names:
@@ -59,9 +102,31 @@ def _parse_tool_call_from_text(content: str, available_tools: list) -> dict | No
     if not mentioned_tool:
         return None
 
-    # Try to extract JSON arguments
+    # Try to extract JSON with nested braces support (for SSTI payloads with {{ }})
+    json_str = _extract_json_with_nested_braces(content)
+
+    if json_str:
+        try:
+            parsed = json.loads(json_str)
+
+            # Check if it's a tool call format
+            if isinstance(parsed, dict) and "name" in parsed:
+                tool_name = parsed.get("name")
+                if tool_name in tool_names:
+                    # Extract args from "parameters" or "args" key
+                    args = parsed.get("parameters", parsed.get("args", {}))
+                    if isinstance(args, dict):
+                        return {
+                            "name": tool_name,
+                            "args": args,
+                            "id": f"parsed_{tool_name}",
+                        }
+        except json.JSONDecodeError:
+            pass
+
+    # Fallback: Try simple JSON extraction for basic cases
     try:
-        # Look for JSON object in content
+        # Look for simpler JSON without nested braces
         json_match = re.search(r'\{[^{}]*\}', content)
         if json_match:
             json_str = json_match.group()
@@ -251,9 +316,9 @@ class CTFOrchestrator:
             # Return empty response to trigger retry on next iteration
             return {"messages": [], "error_count": state["error_count"] + 1}
 
-        # Log thinking
+        # Log thinking (full content to file, truncated to console)
         if response.content:
-            log_thinking(str(response.content)[:500])
+            log_thinking(str(response.content))
 
         # Check for tool calls
         has_tool_calls = hasattr(response, "tool_calls") and response.tool_calls
@@ -334,13 +399,13 @@ class CTFOrchestrator:
             if isinstance(msg, ToolMessage):
                 result = msg.content
 
-                log_tool_result(msg.name, str(result)[:800])
+                log_tool_result(msg.name, str(result))
 
                 # Check for errors
                 is_error = "error" in str(result).lower()
                 if is_error:
                     error_count += 1
-                    log_error(f"Tool error: {result[:200]}")
+                    log_error(f"Tool error: {result}")
 
                 # Add to history
                 action_history.append({
