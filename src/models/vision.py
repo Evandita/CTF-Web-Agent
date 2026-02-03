@@ -54,7 +54,7 @@ def format_elements(elements: list[dict[str, Any]]) -> str:
             elem_type = elem.get("type", "")
             elem_id = elem.get("id", "")
             elem_class = elem.get("class", "")
-            text = elem.get("text", "")[:50]
+            text = elem.get("text", "")
             selector = elem.get("selector", "")
 
             desc = f"{i}. <{tag}>"
@@ -78,8 +78,8 @@ def format_elements(elements: list[dict[str, Any]]) -> str:
             tag = elem.get("tag", "unknown")
             elem_type = elem.get("type", "")
             elem_id = elem.get("id", "")
-            text = elem.get("text", "")[:50]
-            value = elem.get("value", "")[:50]
+            text = elem.get("text", "")
+            value = elem.get("value", "")
             selector = elem.get("selector", "")
 
             desc = f"{i}. <{tag}>"
@@ -117,9 +117,6 @@ def format_cookies(cookies: list[dict[str, Any]]) -> str:
         name = cookie.get("name", "unknown")
         value = cookie.get("value", "")
         domain = cookie.get("domain", "")
-        # Truncate long values
-        if len(value) > 50:
-            value = value[:50] + "..."
         lines.append(f"  - {name}={value} (domain: {domain})")
 
     return "\n".join(lines)
@@ -140,9 +137,6 @@ def format_html_hints(hints: list[str]) -> str:
 
     lines = ["HTML hints/comments found:"]
     for hint in hints:
-        # Truncate long hints
-        if len(hint) > 200:
-            hint = hint[:200] + "..."
         lines.append(f"  - {hint}")
 
     return "\n".join(lines)

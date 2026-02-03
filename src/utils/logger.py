@@ -144,17 +144,15 @@ def log_observation(observation: str) -> None:
 
 def log_thinking(thought: str) -> None:
     """Log agent reasoning/thinking (yellow panel)."""
-    # Truncate for console readability
-    display_thought = thought[:500] + "..." if len(thought) > 500 else thought
     panel = Panel(
-        display_thought,
+        thought,
         title="[bold yellow]Thinking[/bold yellow]",
         border_style="yellow",
         expand=False,
     )
     console.print(panel)
 
-    # Log FULL content to file (untruncated)
+    # Log to file
     _log_to_file("INFO", "THINKING", thought)
 
 
@@ -178,17 +176,15 @@ def log_flag_found(flag: str) -> None:
 
 def log_error(error: str) -> None:
     """Log an error (red panel)."""
-    # Truncate for console readability
-    display_error = error[:500] + "..." if len(error) > 500 else error
     panel = Panel(
-        display_error,
+        error,
         title="[bold red]Error[/bold red]",
         border_style="red",
         expand=False,
     )
     console.print(panel)
 
-    # Log FULL content to file (untruncated)
+    # Log to file
     _log_to_file("ERROR", "ERROR", error)
 
 
@@ -207,17 +203,9 @@ def log_state(state: dict[str, Any]) -> None:
 
         # Format the value for display
         if isinstance(value, list):
-            if len(value) > 3:
-                display_value = f"[{len(value)} items]"
-            else:
-                display_value = str(value)[:100]
+            display_value = str(value)
         elif isinstance(value, dict):
-            if len(value) > 3:
-                display_value = f"{{{len(value)} keys}}"
-            else:
-                display_value = str(value)[:100]
-        elif isinstance(value, str) and len(value) > 100:
-            display_value = value[:100] + "..."
+            display_value = str(value)
         else:
             display_value = str(value)
 
@@ -242,7 +230,7 @@ def log_iteration(iteration: int, max_iterations: int) -> None:
 
 def log_tool_call(tool_name: str, args: dict[str, Any]) -> None:
     """Log a tool call being made."""
-    args_str = ", ".join(f"{k}={repr(v)[:50]}" for k, v in args.items())
+    args_str = ", ".join(f"{k}={repr(v)}" for k, v in args.items())
     console.print(f"[dim]Calling tool: [bold]{tool_name}[/bold]({args_str})[/dim]")
 
     # Log full args to file (untruncated)
@@ -251,10 +239,9 @@ def log_tool_call(tool_name: str, args: dict[str, Any]) -> None:
 
 def log_tool_result(tool_name: str, result: str) -> None:
     """Log a tool result."""
-    truncated = result[:200] + "..." if len(result) > 200 else result
-    console.print(f"[dim]Tool result from {tool_name}: {truncated}[/dim]")
+    console.print(f"[dim]Tool result from {tool_name}: {result}[/dim]")
 
-    # Log full result to file (untruncated)
+    # Log full result to file
     _log_to_file("INFO", "TOOL_RESULT", f"Tool result from {tool_name}", {"result": result})
 
 

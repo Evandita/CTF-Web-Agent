@@ -47,6 +47,10 @@ class AgentState(TypedDict):
     # Challenge type classification
     challenge_type: str | None
 
+    # Exploration queue - tracks interesting things to investigate
+    # Each item: {"type": "dir|file|path|payload", "target": "/path", "reason": "why interesting", "priority": 1-3}
+    exploration_queue: list[dict[str, Any]]
+
 
 def create_initial_state(
     challenge_url: str,
@@ -82,6 +86,7 @@ def create_initial_state(
         needs_human_help=False,
         human_input=None,
         challenge_type=None,
+        exploration_queue=[],
     )
 
 
@@ -110,7 +115,7 @@ def add_action_to_history(
         "iteration": state["iteration"],
         "action": action,
         "args": args,
-        "result": result[:1000],  # Store more of result for context
+        "result": result,  # Store full result
         "success": success,
     })
 
@@ -139,15 +144,13 @@ def format_action_history(state: AgentState, last_n: int = 10) -> str:
     lines = ["Recent actions:"]
     for action in history:
         status = "SUCCESS" if action["success"] else "FAILED"
-        args_str = ", ".join(f"{k}={repr(v)[:30]}" for k, v in action["args"].items())
+        args_str = ", ".join(f"{k}={repr(v)}" for k, v in action["args"].items())
         lines.append(f"  [{status}] {action['action']}({args_str})")
         # Include result summary to help LLM understand what happened
         result = action.get("result", "")
         if result:
-            # Show first 300 chars of result
-            result_preview = result[:300].replace('\n', ' ')
-            if len(result) > 300:
-                result_preview += "..."
+            # Show full result
+            result_preview = result.replace('\n', ' ')
             lines.append(f"    Result: {result_preview}")
 
     return "\n".join(lines)
@@ -171,3 +174,85 @@ def check_repeated_failures(state: AgentState, action: str, threshold: int = 3) 
         if a["action"] == action and not a["success"]
     )
     return failures >= threshold
+
+
+def add_to_exploration_queue(
+    state: AgentState,
+    target: str,
+    item_type: str = "unknown",
+    reason: str = "",
+    priority: int = 2,
+) -> list[dict[str, Any]]:
+    """
+    Add an item to the exploration queue.
+
+    Args:
+        state: Current agent state.
+        target: The path/file/payload to explore.
+        item_type: Type of item ("dir", "file", "path", "payload", "url").
+        reason: Why this item is interesting.
+        priority: Priority level (1=high, 2=medium, 3=low).
+
+    Returns:
+        Updated exploration queue.
+    """
+    queue = state["exploration_queue"].copy()
+
+    # Check if already in queue
+    if any(item["target"] == target for item in queue):
+        return queue
+
+    queue.append({
+        "type": item_type,
+        "target": target,
+        "reason": reason,
+        "priority": priority,
+    })
+
+    # Sort by priority (lower number = higher priority)
+    queue.sort(key=lambda x: x["priority"])
+
+    return queue
+
+
+def remove_from_exploration_queue(
+    state: AgentState,
+    target: str,
+) -> list[dict[str, Any]]:
+    """
+    Remove an item from the exploration queue (after exploring it).
+
+    Args:
+        state: Current agent state.
+        target: The target to remove.
+
+    Returns:
+        Updated exploration queue.
+    """
+    queue = state["exploration_queue"].copy()
+    queue = [item for item in queue if item["target"] != target]
+    return queue
+
+
+def format_exploration_queue(state: AgentState) -> str:
+    """
+    Format the exploration queue for inclusion in prompts.
+
+    Args:
+        state: Current agent state.
+
+    Returns:
+        Formatted string of items to explore.
+    """
+    queue = state["exploration_queue"]
+    if not queue:
+        return "No pending items to explore."
+
+    lines = ["Pending exploration queue:"]
+    for i, item in enumerate(queue, 1):
+        priority_label = {1: "HIGH", 2: "MED", 3: "LOW"}.get(item["priority"], "?")
+        lines.append(f"  {i}. [{priority_label}] {item['type']}: {item['target']}")
+        if item.get("reason"):
+            lines.append(f"      Reason: {item['reason']}")
+
+    return "\n".join(lines)

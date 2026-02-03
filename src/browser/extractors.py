@@ -69,61 +69,42 @@ INTERACTIVE_ELEMENTS_JS = """
 }
 """
 
-# JavaScript for extracting HTML hints
+# JavaScript for extracting HTML hints (concise format)
 HTML_HINTS_JS = """
 () => {
     const hints = [];
 
-    // Get all comments
-    const walker = document.createTreeWalker(
-        document,
-        NodeFilter.SHOW_COMMENT,
-        null,
-        false
-    );
-
+    // Get comments
+    const walker = document.createTreeWalker(document, NodeFilter.SHOW_COMMENT, null, false);
     while (walker.nextNode()) {
-        const comment = walker.currentNode.textContent.trim();
-        if (comment) {
-            hints.push('Comment: ' + comment);
-        }
+        const c = walker.currentNode.textContent.trim();
+        if (c) hints.push('<!--' + c.substring(0, 80) + '-->');
     }
 
-    // Get hidden inputs
+    // Hidden inputs
     document.querySelectorAll('input[type="hidden"]').forEach(el => {
-        hints.push(`Hidden input: name="${el.name}" value="${el.value}"`);
+        hints.push(`hidden:${el.name}=${el.value}`);
     });
 
-    // Get data attributes with interesting values
+    // Data attributes
     document.querySelectorAll('[data-flag], [data-secret], [data-token], [data-key]').forEach(el => {
         for (const attr of el.attributes) {
             if (attr.name.startsWith('data-')) {
-                hints.push(`Data attribute: ${attr.name}="${attr.value}"`);
+                hints.push(`${attr.name}=${attr.value}`);
             }
         }
     });
 
-    // Check for interesting meta tags
+    // Meta tags
     document.querySelectorAll('meta[name="flag"], meta[name="secret"], meta[name="hint"]').forEach(el => {
-        hints.push(`Meta: ${el.getAttribute('name')}="${el.getAttribute('content')}"`);
+        hints.push(`meta:${el.getAttribute('name')}=${el.getAttribute('content')}`);
     });
 
-    // Check for base64 in script tags (could be encoded flags)
+    // Base64 in scripts
     document.querySelectorAll('script').forEach(el => {
-        const content = el.textContent || '';
-        const b64Pattern = /[A-Za-z0-9+/]{20,}={0,2}/g;
-        const matches = content.match(b64Pattern);
-        if (matches) {
-            matches.slice(0, 3).forEach(m => {
-                hints.push(`Possible base64 in script: ${m.substring(0, 50)}...`);
-            });
-        }
+        const b64 = (el.textContent || '').match(/[A-Za-z0-9+/]{20,}={0,2}/g);
+        if (b64) b64.slice(0, 2).forEach(m => hints.push(`b64:${m.substring(0, 40)}`));
     });
-
-    // Check page title
-    if (document.title) {
-        hints.push(`Page title: ${document.title}`);
-    }
 
     return hints;
 }
@@ -311,7 +292,7 @@ def build_element_selector(element_info: dict[str, Any]) -> str:
     text = element_info.get("text", "")
     if text:
         # Playwright text selector
-        return f"{tag}:has-text(\"{text[:30]}\")"
+        return f"{tag}:has-text(\"{text}\")"
 
     return tag
 

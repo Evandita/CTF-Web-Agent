@@ -96,7 +96,7 @@ class BrowserController:
                 "url": response.url,
                 "status": response.status,
                 "headers": dict(response.headers),
-                "body": body[:5000] if body else "",  # Limit body size
+                "body": body if body else "",
             })
         except Exception:
             # Ignore errors in response capture
@@ -139,7 +139,7 @@ class BrowserController:
             current_url = self.page.url
 
             log_action("Navigate", f"URL: {url}, Status: {status}")
-            return f"Navigated to {current_url}. Status: {status}"
+            return f"OK ({status})"
 
         except Exception as e:
             log_error(f"Navigation failed: {e}")
@@ -170,7 +170,7 @@ class BrowserController:
             await self.page.wait_for_load_state("domcontentloaded", timeout=5000)
 
             log_action("Click", f"Selector: {selector}")
-            return f"Clicked element: {selector}. Current URL: {self.page.url}"
+            return "Clicked."
 
         except Exception as e:
             log_error(f"Click failed: {e}")
@@ -199,8 +199,8 @@ class BrowserController:
                 timeout=settings.timeout_seconds * 1000,
             )
 
-            log_action("Fill", f"Selector: {selector}, Value: {value[:50]}...")
-            return f"Filled {selector} with value: {value}"
+            log_action("Fill", f"Selector: {selector}, Value: {value}")
+            return "Filled."
 
         except Exception as e:
             log_error(f"Fill failed: {e}")
@@ -288,7 +288,7 @@ class BrowserController:
 
         try:
             result = await self.page.evaluate(code)
-            log_action("Execute JS", f"Code: {code[:50]}...")
+            log_action("Execute JS", f"Code: {code}")
             return str(result)
         except Exception as e:
             log_error(f"JS execution failed: {e}")
@@ -302,7 +302,7 @@ class BrowserController:
         try:
             await self.page.go_back(wait_until="domcontentloaded")
             log_action("Go back", f"Current URL: {self.page.url}")
-            return f"Navigated back. Current URL: {self.page.url}"
+            return "Back."
         except Exception as e:
             return f"Error going back: {e}"
 
@@ -314,7 +314,7 @@ class BrowserController:
         try:
             await self.page.go_forward(wait_until="domcontentloaded")
             log_action("Go forward", f"Current URL: {self.page.url}")
-            return f"Navigated forward. Current URL: {self.page.url}"
+            return "Forward."
         except Exception as e:
             return f"Error going forward: {e}"
 
@@ -327,7 +327,7 @@ class BrowserController:
             self.clear_captures()
             await self.page.reload(wait_until="domcontentloaded")
             log_action("Refresh", f"Current URL: {self.page.url}")
-            return f"Page refreshed. Current URL: {self.page.url}"
+            return "Refreshed."
         except Exception as e:
             return f"Error refreshing page: {e}"
 
@@ -346,7 +346,7 @@ class BrowserController:
 
         try:
             await self.page.wait_for_timeout(seconds * 1000)
-            return f"Waited {seconds} seconds"
+            return "OK."
         except Exception as e:
             return f"Error waiting: {e}"
 
@@ -371,7 +371,7 @@ class BrowserController:
                 await self.page.evaluate(f"window.scrollBy(0, -{amount})")
 
             log_action("Scroll", f"Direction: {direction}, Amount: {amount}px")
-            return f"Scrolled {direction} by {amount}px"
+            return "Scrolled."
         except Exception as e:
             return f"Error scrolling: {e}"
 
@@ -392,7 +392,7 @@ class BrowserController:
             settings = get_settings()
             await self.page.hover(selector, timeout=settings.timeout_seconds * 1000)
             log_action("Hover", f"Selector: {selector}")
-            return f"Hovering over {selector}"
+            return "Hovering."
         except Exception as e:
             return f"Error hovering over {selector}: {e}"
 
@@ -418,7 +418,7 @@ class BrowserController:
                 timeout=settings.timeout_seconds * 1000,
             )
             log_action("Select option", f"Selector: {selector}, Value: {value}")
-            return f"Selected {value} in {selector}"
+            return "Selected."
         except Exception as e:
             return f"Error selecting option: {e}"
 
@@ -438,7 +438,7 @@ class BrowserController:
         try:
             await self.page.keyboard.press(key)
             log_action("Press key", f"Key: {key}")
-            return f"Pressed key: {key}"
+            return "OK."
         except Exception as e:
             return f"Error pressing key: {e}"
 
@@ -514,7 +514,7 @@ class BrowserController:
                 selector,
                 timeout=timeout * 1000,
             )
-            return f"Element {selector} found"
+            return "Found."
         except Exception as e:
             return f"Timeout waiting for {selector}: {e}"
 
@@ -541,8 +541,8 @@ class BrowserController:
                 delay=delay,
                 timeout=settings.timeout_seconds * 1000,
             )
-            log_action("Type", f"Selector: {selector}, Text: {text[:30]}...")
-            return f"Typed text into {selector}"
+            log_action("Type", f"Selector: {selector}, Text: {text}")
+            return "Typed."
         except Exception as e:
             return f"Error typing text: {e}"
 

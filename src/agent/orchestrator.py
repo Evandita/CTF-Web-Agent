@@ -11,7 +11,7 @@ from langgraph.prebuilt import ToolNode
 from .state import AgentState, create_initial_state, add_action_to_history, format_action_history
 from .prompts import SYSTEM_PROMPT, format_planning_prompt, format_reflection_prompt
 from ..browser.controller import BrowserController
-from ..browser.tools import ALL_TOOLS, set_browser_controller
+from ..browser.tools import ALL_TOOLS, set_browser_controller, set_exploration_queue, get_exploration_queue
 from ..browser.extractors import extract_interactive_elements, extract_html_hints
 from ..models.ollama_client import get_text_model
 from ..utils.flag_detector import detect_flag_in_page
@@ -211,6 +211,9 @@ class CTFOrchestrator:
 
         log_iteration(iteration, state["max_iterations"])
 
+        # Sync exploration queue from state to tools
+        set_exploration_queue(state.get("exploration_queue", []))
+
         # Get page information
         if self.browser.page:
             url = self.browser.get_current_url()
@@ -301,7 +304,6 @@ class CTFOrchestrator:
         # Add system message if first iteration
         if state["iteration"] == 1:
             messages.append(SystemMessage(content=SYSTEM_PROMPT))
-            messages.append(HumanMessage(content=f"Solve the CTF challenge at: {state['current_url']}"))
 
         # Add current context
         messages.append(HumanMessage(content=f"{context_prompt}\n\n{page_context}"))
@@ -316,9 +318,13 @@ class CTFOrchestrator:
             # Return empty response to trigger retry on next iteration
             return {"messages": [], "error_count": state["error_count"] + 1}
 
-        # Log thinking (full content to file, truncated to console)
+        # Log thinking (model's reasoning)
         if response.content:
             log_thinking(str(response.content))
+        elif hasattr(response, "tool_calls") and response.tool_calls:
+            # Model returned tool calls without reasoning - log what it's doing
+            tool_names = [tc["name"] for tc in response.tool_calls]
+            log_thinking(f"(No reasoning provided - calling: {', '.join(tool_names)})")
 
         # Check for tool calls
         has_tool_calls = hasattr(response, "tool_calls") and response.tool_calls
@@ -346,60 +352,35 @@ class CTFOrchestrator:
         return {"messages": [response]}
 
     def _build_page_context(self, state: AgentState) -> str:
-        """Build page context string for the LLM."""
-        lines = [
-            f"Current URL: {state['current_url']}",
-            f"Page Title: {state.get('page_title', 'Unknown')}",
-            "",
-        ]
+        """Build concise page context for LLM."""
+        lines = [f"Title: {state.get('page_title', 'Unknown')}"]
 
-        # Add elements summary (separate visible and hidden for CTF)
         elements = state.get("interactive_elements", [])
         if elements:
             visible = [e for e in elements if e.get("is_visible", True)]
             hidden = [e for e in elements if not e.get("is_visible", True)]
 
-            # Show visible elements first (prioritized but not exclusive)
             if visible:
-                lines.append(f"Visible Interactive Elements ({len(visible)}):")
-                for elem in visible[:8]:
-                    tag = elem.get("tag", "?")
-                    selector = elem.get("selector", "")
-                    text = elem.get("text", "")[:30]
-                    lines.append(f"  - <{tag}> {selector} : {text}")
-                if len(visible) > 8:
-                    lines.append(f"  ... and {len(visible) - 8} more")
-                lines.append("")
+                elem_strs = [f"<{e.get('tag')}>{e.get('selector')}" for e in visible]
+                lines.append(f"Visible: {', '.join(elem_strs)}")
 
-            # Show hidden elements (important for CTF challenges)
             if hidden:
-                lines.append(f"Hidden Elements ({len(hidden)}) - may contain flags/hints:")
-                for elem in hidden[:5]:
-                    tag = elem.get("tag", "?")
-                    selector = elem.get("selector", "")
-                    text = elem.get("text", "")[:30]
-                    elem_type = elem.get("type", "")
-                    type_str = f" type={elem_type}" if elem_type else ""
-                    lines.append(f"  - <{tag}{type_str}> {selector} : {text}")
-                if len(hidden) > 5:
-                    lines.append(f"  ... and {len(hidden) - 5} more")
-                lines.append("")
+                elem_strs = [f"<{e.get('tag')}>{e.get('selector')}" for e in hidden]
+                lines.append(f"Hidden: {', '.join(elem_strs)}")
 
-        # Add hints
         hints = state.get("html_hints", [])
         if hints:
-            lines.append(f"HTML Hints ({len(hints)}):")
-            for hint in hints[:5]:
-                lines.append(f"  - {hint[:80]}")
-            lines.append("")
+            lines.append(f"Hints: {'; '.join(h for h in hints)}")
 
-        # Add cookies
         cookies = state.get("cookies", [])
         if cookies:
-            lines.append(f"Cookies ({len(cookies)}):")
-            for cookie in cookies[:5]:
-                lines.append(f"  - {cookie.get('name')}={cookie.get('value', '')[:30]}")
-            lines.append("")
+            lines.append(f"Cookies: {', '.join(c.get('name') for c in cookies)}")
+
+        # Include exploration queue if not empty
+        queue = state.get("exploration_queue", [])
+        if queue:
+            queue_items = [f"{item['type']}:{item['target']}" for item in queue]
+            lines.append(f"Pending exploration: {', '.join(queue_items)}")
 
         return "\n".join(lines)
 
@@ -470,9 +451,13 @@ class CTFOrchestrator:
                     "action_history": action_history[-50:],
                 }
 
+        # Sync exploration queue from tools back to state
+        current_queue = get_exploration_queue()
+
         return {
             "error_count": error_count,
             "action_history": action_history[-50:],
+            "exploration_queue": current_queue,
         }
 
     def _should_execute(self, state: AgentState) -> Literal["execute", "end"]:
