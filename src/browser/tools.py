@@ -330,23 +330,53 @@ async def list_interactive_elements() -> str:
 
     elements = await extract_interactive_elements(browser.page)
 
-    lines = [f"Found {len(elements)} interactive elements:\n"]
-    for i, elem in enumerate(elements, 1):
-        tag = elem.get("tag")
-        selector = elem.get("selector")
-        elem_type = elem.get("type", "")
-        text = elem.get("text", "")[:40]
-        name = elem.get("name", "")
+    visible = [e for e in elements if e.get("is_visible", True)]
+    hidden = [e for e in elements if not e.get("is_visible", True)]
 
-        line = f"{i}. <{tag}>"
-        if elem_type:
-            line += f" type='{elem_type}'"
-        if name:
-            line += f" name='{name}'"
-        line += f"\n   Selector: {selector}"
-        if text:
-            line += f"\n   Text: '{text}'"
-        lines.append(line)
+    lines = [f"Found {len(elements)} interactive elements ({len(visible)} visible, {len(hidden)} hidden):\n"]
+
+    # List visible elements
+    if visible:
+        lines.append("VISIBLE ELEMENTS:")
+        for i, elem in enumerate(visible, 1):
+            tag = elem.get("tag")
+            selector = elem.get("selector")
+            elem_type = elem.get("type", "")
+            text = elem.get("text", "")[:40]
+            name = elem.get("name", "")
+
+            line = f"{i}. <{tag}>"
+            if elem_type:
+                line += f" type='{elem_type}'"
+            if name:
+                line += f" name='{name}'"
+            line += f"\n   Selector: {selector}"
+            if text:
+                line += f"\n   Text: '{text}'"
+            lines.append(line)
+
+    # List hidden elements separately (important for CTF)
+    if hidden:
+        lines.append("\nHIDDEN ELEMENTS (may contain flags/hints):")
+        for i, elem in enumerate(hidden, 1):
+            tag = elem.get("tag")
+            selector = elem.get("selector")
+            elem_type = elem.get("type", "")
+            text = elem.get("text", "")[:40]
+            name = elem.get("name", "")
+            value = elem.get("value", "")[:40]
+
+            line = f"{i}. <{tag}>"
+            if elem_type:
+                line += f" type='{elem_type}'"
+            if name:
+                line += f" name='{name}'"
+            line += f"\n   Selector: {selector}"
+            if text:
+                line += f"\n   Text: '{text}'"
+            if value:
+                line += f"\n   Value: '{value}'"
+            lines.append(line)
 
     return "\n".join(lines)
 

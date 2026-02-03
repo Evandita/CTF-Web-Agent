@@ -353,18 +353,37 @@ class CTFOrchestrator:
             "",
         ]
 
-        # Add elements summary
+        # Add elements summary (separate visible and hidden for CTF)
         elements = state.get("interactive_elements", [])
         if elements:
-            lines.append(f"Interactive Elements ({len(elements)}):")
-            for elem in elements[:10]:
-                tag = elem.get("tag", "?")
-                selector = elem.get("selector", "")
-                text = elem.get("text", "")[:30]
-                lines.append(f"  - <{tag}> {selector} : {text}")
-            if len(elements) > 10:
-                lines.append(f"  ... and {len(elements) - 10} more")
-            lines.append("")
+            visible = [e for e in elements if e.get("is_visible", True)]
+            hidden = [e for e in elements if not e.get("is_visible", True)]
+
+            # Show visible elements first (prioritized but not exclusive)
+            if visible:
+                lines.append(f"Visible Interactive Elements ({len(visible)}):")
+                for elem in visible[:8]:
+                    tag = elem.get("tag", "?")
+                    selector = elem.get("selector", "")
+                    text = elem.get("text", "")[:30]
+                    lines.append(f"  - <{tag}> {selector} : {text}")
+                if len(visible) > 8:
+                    lines.append(f"  ... and {len(visible) - 8} more")
+                lines.append("")
+
+            # Show hidden elements (important for CTF challenges)
+            if hidden:
+                lines.append(f"Hidden Elements ({len(hidden)}) - may contain flags/hints:")
+                for elem in hidden[:5]:
+                    tag = elem.get("tag", "?")
+                    selector = elem.get("selector", "")
+                    text = elem.get("text", "")[:30]
+                    elem_type = elem.get("type", "")
+                    type_str = f" type={elem_type}" if elem_type else ""
+                    lines.append(f"  - <{tag}{type_str}> {selector} : {text}")
+                if len(hidden) > 5:
+                    lines.append(f"  ... and {len(hidden) - 5} more")
+                lines.append("")
 
         # Add hints
         hints = state.get("html_hints", [])

@@ -41,28 +41,60 @@ def format_elements(elements: list[dict[str, Any]]) -> str:
     if not elements:
         return "No interactive elements found."
 
-    lines = ["Interactive elements found on the page:"]
-    for i, elem in enumerate(elements, 1):
-        tag = elem.get("tag", "unknown")
-        elem_type = elem.get("type", "")
-        elem_id = elem.get("id", "")
-        elem_class = elem.get("class", "")
-        text = elem.get("text", "")[:50]
-        selector = elem.get("selector", "")
+    visible = [e for e in elements if e.get("is_visible", True)]
+    hidden = [e for e in elements if not e.get("is_visible", True)]
 
-        desc = f"{i}. <{tag}>"
-        if elem_type:
-            desc += f" type='{elem_type}'"
-        if elem_id:
-            desc += f" id='{elem_id}'"
-        if elem_class:
-            desc += f" class='{elem_class}'"
-        if text:
-            desc += f" text='{text}'"
-        if selector:
-            desc += f"\n   Selector: {selector}"
+    lines = []
 
-        lines.append(desc)
+    # Format visible elements
+    if visible:
+        lines.append(f"Visible interactive elements ({len(visible)}):")
+        for i, elem in enumerate(visible, 1):
+            tag = elem.get("tag", "unknown")
+            elem_type = elem.get("type", "")
+            elem_id = elem.get("id", "")
+            elem_class = elem.get("class", "")
+            text = elem.get("text", "")[:50]
+            selector = elem.get("selector", "")
+
+            desc = f"{i}. <{tag}>"
+            if elem_type:
+                desc += f" type='{elem_type}'"
+            if elem_id:
+                desc += f" id='{elem_id}'"
+            if elem_class:
+                desc += f" class='{elem_class}'"
+            if text:
+                desc += f" text='{text}'"
+            if selector:
+                desc += f"\n   Selector: {selector}"
+
+            lines.append(desc)
+
+    # Format hidden elements (important for CTF)
+    if hidden:
+        lines.append(f"\nHidden elements ({len(hidden)}) - may contain flags or hints:")
+        for i, elem in enumerate(hidden, 1):
+            tag = elem.get("tag", "unknown")
+            elem_type = elem.get("type", "")
+            elem_id = elem.get("id", "")
+            text = elem.get("text", "")[:50]
+            value = elem.get("value", "")[:50]
+            selector = elem.get("selector", "")
+
+            desc = f"{i}. <{tag}>"
+            if elem_type:
+                desc += f" type='{elem_type}'"
+            if elem_id:
+                desc += f" id='{elem_id}'"
+            if text:
+                desc += f" text='{text}'"
+            if value:
+                desc += f" value='{value}'"
+            if selector:
+                desc += f"\n   Selector: {selector}"
+
+            lines.append(desc)
 
     return "\n".join(lines)
 

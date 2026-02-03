@@ -219,9 +219,11 @@ async def extract_interactive_elements(page: Page) -> list[dict[str, Any]]:
     """
     try:
         elements = await page.evaluate(INTERACTIVE_ELEMENTS_JS)
-        # Filter to only visible elements
-        visible_elements = [e for e in elements if e.get("visible", True)]
-        return visible_elements
+        # Keep all elements (visible and hidden) with visibility status
+        # Hidden elements are important in CTF challenges
+        for elem in elements:
+            elem['is_visible'] = elem.get('visible', True)
+        return elements
     except Exception as e:
         log_error(f"Failed to extract interactive elements: {e}")
         return []
