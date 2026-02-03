@@ -431,7 +431,7 @@ class CTFOrchestrator:
                     "iteration": state["iteration"],
                     "action": msg.name,
                     "args": {},  # Args not easily accessible here
-                    "result": str(result)[:1000],
+                    "result": result,
                     "success": not is_error,
                 })
 
