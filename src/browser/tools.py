@@ -166,19 +166,104 @@ async def fill_input(selector: str, value: str, submit: bool = True) -> str:
                 pass
 
         # Build response with clear output indication
+        global _exploration_queue
+        dequeued_items = []
+
+        # Auto-dequeue: if this was an ls command, remove that directory from queue
+        ls_match = re.search(r"ls\s+(?:-\w+\s+)?([/\w.-]+)", value)
+        if ls_match:
+            explored_path = ls_match.group(1).rstrip('/')
+            if not explored_path:
+                explored_path = "/"
+            # Remove from queue if present
+            original_len = len(_exploration_queue)
+            _exploration_queue = [item for item in _exploration_queue if item["target"] != explored_path]
+            if len(_exploration_queue) < original_len:
+                dequeued_items.append(f"dir:{explored_path}")
+
+        # Auto-dequeue: if this was a cat command, remove that file from queue
+        cat_match = re.search(r"cat\s+([/\w.-]+)", value)
+        if cat_match:
+            explored_file = cat_match.group(1)
+            # Remove from queue if present
+            original_len = len(_exploration_queue)
+            _exploration_queue = [item for item in _exploration_queue if item["target"] != explored_file]
+            if len(_exploration_queue) < original_len:
+                dequeued_items.append(f"file:{explored_file}")
+
         if body_text.strip():
             output = f"Output: {body_text}"
 
-            # Detect directory listing and add guidance to explore subdirectories
+            # Detect directory listing and auto-queue interesting items
             if re.search(r'drwx|total \d+', body_text):
-                # Find interesting directories in the listing
-                interesting_dirs = re.findall(r'(challenge|app|flag|ctf|secret|home)', body_text, re.IGNORECASE)
-                if interesting_dirs:
-                    unique_dirs = list(set(d.lower() for d in interesting_dirs))
-                    output += f"\n\n** IMPORTANT: Found important files/directories: {', '.join(unique_dirs)}. Try to explore each directory first and DON'T guess any filenames! **"
+                queued_items = []
+
+                # Extract current path from the command if it was an ls command
+                current_path = "/"
+                if ls_match:
+                    current_path = ls_match.group(1).rstrip('/')
+                    if not current_path:
+                        current_path = "/"
+
+                # Parse directory listing to find files and directories
+                # Pattern: permissions followed by filename at end of line
+                # Match lines like: drwxr-xr-x 1 root root 25 Feb 3 08:49 challenge
+                listing_pattern = r'([d-])(?:[rwx-]{9})\s+\d+\s+\S+\s+\S+\s+\d+\s+\S+\s+\d+\s+[\d:]+\s+(\S+)'
+                entries = re.findall(listing_pattern, body_text)
+
+                interesting_keywords = ['flag', 'challenge', 'secret', 'ctf', 'key', 'password', 'admin', 'config', 'root', 'home']
+
+                for is_dir, name in entries:
+                    if name in ['.', '..']:
+                        continue
+
+                    # Build full path
+                    if current_path == "/":
+                        full_path = f"/{name}"
+                    else:
+                        full_path = f"{current_path}/{name}"
+
+                    # Check if interesting
+                    is_interesting = any(kw in name.lower() for kw in interesting_keywords)
+
+                    # Also check for files that might contain flags
+                    is_potential_flag_file = is_dir == '-' and (
+                        'flag' in name.lower() or
+                        name.endswith('.txt') or
+                        name == 'flag'
+                    )
+
+                    if is_interesting or is_potential_flag_file:
+                        item_type = "dir" if is_dir == 'd' else "file"
+                        priority = 1 if 'flag' in name.lower() else 2
+
+                        # Add to queue if not already there
+                        if not any(item["target"] == full_path for item in _exploration_queue):
+                            _exploration_queue.append({
+                                "type": item_type,
+                                "target": full_path,
+                                "reason": f"Found in {current_path}",
+                                "priority": priority,
+                            })
+                            queued_items.append(f"{item_type}:{full_path}")
+
+                # Sort queue by priority
+                _exploration_queue.sort(key=lambda x: x["priority"])
+
+                if queued_items:
+                    output += f"\n\n** AUTO-QUEUED: {', '.join(queued_items)} **"
+
+            # Add dequeue and queue status info
+            if dequeued_items:
+                output += f"\n** EXPLORED & REMOVED: {', '.join(dequeued_items)} **"
+            if _exploration_queue:
+                output += f"\n** Queue has {len(_exploration_queue)} items remaining. **"
         else:
             # Show raw HTML when body text is empty (command may have failed or returned nothing)
             output = f"Output: (empty - raw HTML: {html})\n** File may not exist. Try listing the directory first with 'ls -la /path' **"
+            # Still show dequeue info even if empty output
+            if dequeued_items:
+                output += f"\n** EXPLORED & REMOVED: {', '.join(dequeued_items)} **"
 
         if navigated_back:
             return f"{output}\n(navigated back)"
@@ -205,18 +290,49 @@ async def get_page_state() -> str:
     hints = await extract_html_hints(browser.page)
     cookies = await browser.get_cookies()
 
-    # Concise format
-    lines = [f"Title: {title}"]
+    lines = [f"Page: {title}"]
 
+    # Forms with their fields
     if forms:
-        lines.append("Forms: " + ", ".join(f"{f.get('selector')}({f.get('method')})" for f in forms))
+        lines.append("Forms:")
+        for f in forms:
+            method = f.get('method', 'GET')
+            action = f.get('action', '')
+            lines.append(f"  - {f.get('selector')} [{method}] action={action or '(same page)'}")
+            # Show form fields
+            for field in f.get('fields', []):
+                field_name = field.get('name') or field.get('id') or '(unnamed)'
+                field_type = field.get('type', 'text')
+                lines.append(f"      field: {field_name} type={field_type}")
 
-    if elements:
-        elem_strs = [f"<{e.get('tag')}>{e.get('selector')}" for e in elements]
-        lines.append("Elements: " + ", ".join(elem_strs))
+    # Interactive elements (inputs, buttons) - show selectors clearly
+    inputs = [e for e in elements if e.get('tag') in ['input', 'textarea', 'select']]
+    buttons = [e for e in elements if e.get('tag') == 'button' or e.get('type') == 'submit']
+
+    if inputs:
+        lines.append("Inputs:")
+        for e in inputs:
+            selector = e.get('selector', '?')
+            name = e.get('name', '')
+            etype = e.get('type', 'text')
+            placeholder = e.get('placeholder', '')
+            parts = [f"  - selector=\"{selector}\""]
+            if name:
+                parts.append(f"name=\"{name}\"")
+            parts.append(f"type={etype}")
+            if placeholder:
+                parts.append(f"placeholder=\"{placeholder}\"")
+            lines.append(" ".join(parts))
+
+    if buttons:
+        lines.append("Buttons:")
+        for e in buttons:
+            selector = e.get('selector', '?')
+            text = e.get('text', '').strip()[:30]
+            lines.append(f"  - selector=\"{selector}\" text=\"{text}\"")
 
     if hints:
-        lines.append("Hints: " + "; ".join(h for h in hints))
+        lines.append("Hints: " + "; ".join(hints))
 
     if cookies:
         lines.append("Cookies: " + ", ".join(f"{c.get('name')}={c.get('value', '')}" for c in cookies))
@@ -336,19 +452,41 @@ async def list_interactive_elements() -> str:
 
     lines = []
 
-    # Single-line format per element
+    def format_element(e: dict, index: int) -> str:
+        """Format a single element clearly."""
+        tag = e.get('tag', '?')
+        selector = e.get('selector', '?')
+        parts = [f"{index}. <{tag}> selector=\"{selector}\""]
+
+        # Add relevant attributes based on element type
+        if e.get('name'):
+            parts.append(f"name=\"{e.get('name')}\"")
+        if e.get('type'):
+            parts.append(f"type={e.get('type')}")
+        if e.get('id'):
+            parts.append(f"id=\"{e.get('id')}\"")
+        if e.get('placeholder'):
+            parts.append(f"placeholder=\"{e.get('placeholder')}\"")
+        if e.get('value'):
+            parts.append(f"value=\"{e.get('value')}\"")
+        if e.get('text'):
+            text = e.get('text', '').strip()[:50]
+            if text:
+                parts.append(f"text=\"{text}\"")
+        if e.get('href'):
+            parts.append(f"href=\"{e.get('href')}\"")
+
+        return " ".join(parts)
+
     if visible:
-        lines.append("Visible:")
-        for e in visible:
-            name_part = f" name={e.get('name')}" if e.get("name") else ""
-            text_part = f" '{e.get('text', '')}'" if e.get("text") else ""
-            lines.append(f"  <{e.get('tag')}>{name_part} {e.get('selector')}{text_part}")
+        lines.append(f"Visible ({len(visible)}):")
+        for i, e in enumerate(visible, 1):
+            lines.append(f"  {format_element(e, i)}")
 
     if hidden:
-        lines.append("Hidden:")
-        for e in hidden:
-            value_part = f" value={e.get('value', '')}" if e.get("value") else ""
-            lines.append(f"  <{e.get('tag')}> {e.get('selector')}{value_part}")
+        lines.append(f"Hidden ({len(hidden)}):")
+        for i, e in enumerate(hidden, 1):
+            lines.append(f"  {format_element(e, i)}")
 
     return "\n".join(lines) if lines else "No interactive elements found."
 
@@ -575,6 +713,49 @@ def _analyze_payload_response(payload: str, payload_type: str, html: str, origin
                 interesting_dirs = re.findall(r'(challenge|app|home|flag|ctf|secret)', listing, re.IGNORECASE)
                 if interesting_dirs:
                     findings.append(f"INTERESTING DIRECTORIES: {', '.join(set(interesting_dirs))}")
+
+                # Auto-queue interesting items found in the listing
+                global _exploration_queue
+                queued_items = []
+
+                # Try to extract path from the payload (e.g., 'ls -la /')
+                current_path = "/"
+                path_match = re.search(r"ls\s+(?:-\w+\s+)?([/\w.-]+)", payload)
+                if path_match:
+                    current_path = path_match.group(1).rstrip('/')
+                    if not current_path:
+                        current_path = "/"
+
+                # Parse entries from listing
+                listing_pattern = r'([d-])(?:[rwx-]{9})\s+\d+\s+\S+\s+\S+\s+\d+\s+\S+\s+\d+\s+[\d:]+\s+(\S+)'
+                entries = re.findall(listing_pattern, listing)
+
+                interesting_keywords = ['flag', 'challenge', 'secret', 'ctf', 'key', 'password', 'admin', 'config']
+
+                for is_dir, name in entries:
+                    if name in ['.', '..']:
+                        continue
+
+                    full_path = f"{current_path}/{name}" if current_path != "/" else f"/{name}"
+                    is_interesting = any(kw in name.lower() for kw in interesting_keywords)
+                    is_potential_flag = is_dir == '-' and ('flag' in name.lower() or name == 'flag')
+
+                    if is_interesting or is_potential_flag:
+                        item_type = "dir" if is_dir == 'd' else "file"
+                        priority = 1 if 'flag' in name.lower() else 2
+
+                        if not any(item["target"] == full_path for item in _exploration_queue):
+                            _exploration_queue.append({
+                                "type": item_type,
+                                "target": full_path,
+                                "reason": f"Found in {current_path}",
+                                "priority": priority,
+                            })
+                            queued_items.append(f"{item_type}:{full_path}")
+
+                _exploration_queue.sort(key=lambda x: x["priority"])
+                if queued_items:
+                    findings.append(f"AUTO-QUEUED: {', '.join(queued_items)}")
 
         # Find command output - extract file paths and STOP
         if 'find' in payload.lower() or 'locate' in payload.lower():

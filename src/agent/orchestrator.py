@@ -8,8 +8,8 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, Tool
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
-from .state import AgentState, create_initial_state, add_action_to_history, format_action_history
-from .prompts import SYSTEM_PROMPT, format_planning_prompt, format_reflection_prompt
+from .state import AgentState, create_initial_state
+from .prompts import SYSTEM_PROMPT, format_planning_prompt, format_reflection_prompt, format_queue_prompt
 from ..browser.controller import BrowserController
 from ..browser.tools import ALL_TOOLS, set_browser_controller, set_exploration_queue, get_exploration_queue
 from ..browser.extractors import extract_interactive_elements, extract_html_hints
@@ -276,24 +276,33 @@ class CTFOrchestrator:
             log_error(f"Reached maximum iterations ({state['max_iterations']})")
             return {}
 
-        # Build context for the LLM
-        action_history = format_action_history(state)
-
-        # Determine if we need reflection (many errors)
-        if state["error_count"] > 3:
-            context_prompt = format_reflection_prompt(
-                url=state["current_url"],
-                page_analysis=state.get("page_analysis", ""),
-                action_history=action_history,
-            )
+        # Check if we have queue items to process first
+        queue = state.get("exploration_queue", [])
+        if queue:
+            # Use queue-specific prompt for the first item
+            first_item = queue[0]
+            queue_prompt = format_queue_prompt(first_item["type"], first_item["target"])
+            if queue_prompt:
+                context_prompt = queue_prompt
+                log_observation(f"Processing queue: {first_item['type']}:{first_item['target']}")
+            else:
+                # Unknown queue type, fall back to normal planning
+                context_prompt = format_planning_prompt(
+                    iteration=state["iteration"],
+                    max_iterations=state["max_iterations"],
+                    challenge_type=state.get("challenge_type"),
+                    error_count=state["error_count"],
+                )
+        elif state["error_count"] > 3:
+            # Reflection mode for many errors
+            context_prompt = format_reflection_prompt()
         else:
+            # Normal planning
             context_prompt = format_planning_prompt(
-                url=state["current_url"],
                 iteration=state["iteration"],
                 max_iterations=state["max_iterations"],
                 challenge_type=state.get("challenge_type"),
                 error_count=state["error_count"],
-                action_history=action_history,
             )
 
         # Add context about current page
@@ -376,12 +385,6 @@ class CTFOrchestrator:
         if cookies:
             lines.append(f"Cookies: {', '.join(c.get('name') for c in cookies)}")
 
-        # Include exploration queue if not empty
-        queue = state.get("exploration_queue", [])
-        if queue:
-            queue_items = [f"{item['type']}:{item['target']}" for item in queue]
-            lines.append(f"Pending exploration: {', '.join(queue_items)}")
-
         return "\n".join(lines)
 
     async def _check_result_node(self, state: AgentState) -> dict:
@@ -392,7 +395,6 @@ class CTFOrchestrator:
         """
         messages = state["messages"]
         error_count = state["error_count"]
-        action_history = state["action_history"].copy()
 
         # Find the last tool message
         for msg in reversed(messages):
@@ -407,15 +409,6 @@ class CTFOrchestrator:
                     error_count += 1
                     log_error(f"Tool error: {result}")
 
-                # Add to history
-                action_history.append({
-                    "iteration": state["iteration"],
-                    "action": msg.name,
-                    "args": {},  # Args not easily accessible here
-                    "result": result,
-                    "success": not is_error,
-                })
-
                 # Check for flag in result
                 from ..utils.flag_detector import detect_flag
                 flag = detect_flag(str(result))
@@ -424,7 +417,6 @@ class CTFOrchestrator:
                     return {
                         "flag_found": flag,
                         "error_count": error_count,
-                        "action_history": action_history[-50:],
                     }
 
                 break
@@ -448,7 +440,6 @@ class CTFOrchestrator:
                 return {
                     "flag_found": flag,
                     "error_count": error_count,
-                    "action_history": action_history[-50:],
                 }
 
         # Sync exploration queue from tools back to state
@@ -456,7 +447,6 @@ class CTFOrchestrator:
 
         return {
             "error_count": error_count,
-            "action_history": action_history[-50:],
             "exploration_queue": current_queue,
         }
 

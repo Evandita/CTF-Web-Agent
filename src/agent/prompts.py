@@ -19,11 +19,6 @@ SYSTEM_PROMPT = """You are a CTF web challenge solver. Find the hidden flag by e
 **Navigation:**
 - `go_back()` - Go to previous page
 
-**Exploration Queue (IMPORTANT - use to track what to explore):**
-- `add_to_queue(target, type, reason, priority)` - Add interesting path/file to explore later
-- `remove_from_queue(target)` - Remove after exploring (found nothing or done)
-- `view_queue()` - See pending items to explore
-
 ## Workflow
 1. **Analyze**: Use get_page_state or list_interactive_elements to understand the page
 2. **Identify**: Find input vectors (forms, inputs, URL params)
@@ -68,21 +63,6 @@ SYSTEM_PROMPT = """You are a CTF web challenge solver. Find the hidden flag by e
    - Example: see `/challenge` → run `ls -la /challenge` → see `flag` → run `cat /challenge/flag`
 6. Flag formats: flag{}, CTF{}, picoCTF{}, HTB{}, FLAG{}
 
-## Exploration Queue Usage
-Use the queue to track interesting things you discover but can't explore immediately:
-- When you see multiple directories (e.g., `/app`, `/challenge`, `/home`), add them ALL to queue
-- When you find interesting files in a listing, add them to queue
-- Process queue items by priority (1=high, 2=medium, 3=low)
-- After exploring an item fully, remove it from queue
-- Check queue with view_queue() when unsure what to explore next
-
-Example workflow:
-1. `ls -la /` shows: app/, challenge/, home/
-2. Add all to queue: add_to_queue("/challenge", "dir", "might have flag", 1)
-3. Explore highest priority first: `ls -la /challenge`
-4. Found flag file → read it
-5. Remove from queue: remove_from_queue("/challenge")
-
 ## Output Interpretation
 - Empty output: Command may have failed or file doesn't exist - try different path
 - Directory listing: Note interesting dirs (challenge/, app/, flag*) and explore them
@@ -94,25 +74,41 @@ ANALYSIS_PROMPT = """Analyze the page. What vulnerability type? What elements to
 
 
 PLANNING_PROMPT = """Iteration {iteration}/{max_iterations}. Errors: {error_count}. Type: {challenge_type}.
-Recent: {action_history}
-Next action?"""
+What's your next action?"""
 
 
-REFLECTION_PROMPT = """Tried: {action_history}
-Not working. Try different approach or vulnerability type."""
+# Task-specific prompts for queue processing
+QUEUE_DIR_PROMPT = """List the directory: {target}
+Use: fill_input(selector, "{{{{lipsum.__globals__['os'].popen('ls -la {target}').read()}}}}")"""
+
+QUEUE_FILE_PROMPT = """Read the file: {target}
+Use: fill_input(selector, "{{{{lipsum.__globals__['os'].popen('cat {target}').read()}}}}")"""
+
+QUEUE_PROMPTS = {
+    "dir": QUEUE_DIR_PROMPT,
+    "file": QUEUE_FILE_PROMPT,
+}
 
 
-STUCK_PROMPT = """Stuck after {error_count} errors. Tried: {action_history}
-Consider: other vuln types, robots.txt, cookies, page source. Use request_human_help if truly stuck."""
+def format_queue_prompt(item_type: str, target: str) -> str | None:
+    """Format a queue-specific prompt for the given item type."""
+    prompt_template = QUEUE_PROMPTS.get(item_type)
+    if prompt_template:
+        return prompt_template.format(target=target)
+    return None
+
+
+REFLECTION_PROMPT = """Your recent approaches aren't working. Try a different vulnerability type or approach."""
+
+
+STUCK_PROMPT = """Stuck after {error_count} errors. Consider: other vuln types, robots.txt, cookies, page source. Use request_human_help if truly stuck."""
 
 
 def format_planning_prompt(
-    url: str,
     iteration: int,
     max_iterations: int,
     challenge_type: str | None,
     error_count: int,
-    action_history: str,
 ) -> str:
     """Format the planning prompt with current state."""
     return PLANNING_PROMPT.format(
@@ -120,29 +116,18 @@ def format_planning_prompt(
         max_iterations=max_iterations,
         challenge_type=challenge_type or "?",
         error_count=error_count,
-        action_history=action_history,
     )
 
 
-def format_reflection_prompt(
-    url: str,
-    page_analysis: str,
-    action_history: str,
-) -> str:
-    """Format the reflection prompt with current state."""
-    return REFLECTION_PROMPT.format(
-        action_history=action_history,
-    )
+def format_reflection_prompt() -> str:
+    """Format the reflection prompt."""
+    return REFLECTION_PROMPT
 
 
 def format_stuck_prompt(
-    url: str,
-    challenge_type: str | None,
     error_count: int,
-    action_history: str,
 ) -> str:
     """Format the stuck prompt with current state."""
     return STUCK_PROMPT.format(
         error_count=error_count,
-        action_history=action_history,
     )
