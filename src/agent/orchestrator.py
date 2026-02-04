@@ -305,9 +305,6 @@ class CTFOrchestrator:
                 error_count=state["error_count"],
             )
 
-        # Add context about current page
-        page_context = self._build_page_context(state)
-
         messages = state["messages"].copy()
 
         # Add system message if first iteration
@@ -315,7 +312,7 @@ class CTFOrchestrator:
             messages.append(SystemMessage(content=SYSTEM_PROMPT))
 
         # Add current context
-        messages.append(HumanMessage(content=f"{context_prompt}\n\n{page_context}"))
+        messages.append(HumanMessage(content=f"{context_prompt}"))
 
         log_thinking("Planning next action...")
 
@@ -359,33 +356,6 @@ class CTFOrchestrator:
             log_observation("The model may not support function calling or didn't decide to use a tool.")
 
         return {"messages": [response]}
-
-    def _build_page_context(self, state: AgentState) -> str:
-        """Build concise page context for LLM."""
-        lines = [f"Title: {state.get('page_title', 'Unknown')}"]
-
-        elements = state.get("interactive_elements", [])
-        if elements:
-            visible = [e for e in elements if e.get("is_visible", True)]
-            hidden = [e for e in elements if not e.get("is_visible", True)]
-
-            if visible:
-                elem_strs = [f"<{e.get('tag')}>{e.get('selector')}" for e in visible]
-                lines.append(f"Visible: {', '.join(elem_strs)}")
-
-            if hidden:
-                elem_strs = [f"<{e.get('tag')}>{e.get('selector')}" for e in hidden]
-                lines.append(f"Hidden: {', '.join(elem_strs)}")
-
-        hints = state.get("html_hints", [])
-        if hints:
-            lines.append(f"Hints: {'; '.join(h for h in hints)}")
-
-        cookies = state.get("cookies", [])
-        if cookies:
-            lines.append(f"Cookies: {', '.join(c.get('name') for c in cookies)}")
-
-        return "\n".join(lines)
 
     async def _check_result_node(self, state: AgentState) -> dict:
         """

@@ -274,15 +274,25 @@ async def fill_input(selector: str, value: str, submit: bool = True) -> str:
 
 @tool
 async def get_page_state() -> str:
-    """Get comprehensive page state including URL, title, forms, and elements.
+    """Get comprehensive page state as JSON including URL, title, forms, elements, and hints.
+
+    Returns JSON with:
+    - url: Current page URL
+    - title: Page title
+    - elements: Interactive elements with selectors, visibility, and interactivity reason
+    - forms: Form details with fields
+    - hints: CTF-specific hints (comments, hidden fields, interesting links)
+    - cookies: Page cookies
 
     Returns:
-        Formatted string with page state information.
+        JSON string with complete page state.
     """
+    import json
+
     browser = get_browser()
 
     if not browser.page:
-        return "Error: Browser not initialized"
+        return json.dumps({"error": "Browser not initialized"})
 
     title = await browser.page.title()
     elements = await extract_interactive_elements(browser.page)
@@ -290,54 +300,53 @@ async def get_page_state() -> str:
     hints = await extract_html_hints(browser.page)
     cookies = await browser.get_cookies()
 
-    lines = [f"Page: {title}"]
+    # Build structured response
+    state = {
+        "url": browser.page.url,
+        "title": title,
+        "elements": {
+            "total": len(elements),
+            "visible": len([e for e in elements if e.get('visible', True)]),
+            "hidden": len([e for e in elements if not e.get('visible', True)]),
+            "items": [
+                {
+                    "selector": e.get('selector'),
+                    "tag": e.get('tag'),
+                    "type": e.get('type'),
+                    "name": e.get('name'),
+                    "text": (e.get('text') or '')[:50],
+                    "placeholder": e.get('placeholder'),
+                    "value": e.get('value'),
+                    "visible": e.get('visible', True),
+                    "reason": e.get('interactiveReason'),
+                }
+                for e in elements[:30]  # Limit to 30 elements
+            ]
+        },
+        "forms": [
+            {
+                "selector": f.get('selector'),
+                "method": f.get('method', 'GET'),
+                "action": f.get('action'),
+                "fields": [
+                    {
+                        "name": field.get('name'),
+                        "type": field.get('type', 'text'),
+                        "id": field.get('id'),
+                    }
+                    for field in f.get('fields', [])
+                ]
+            }
+            for f in forms
+        ],
+        "hints": hints[:20],  # Limit hints
+        "cookies": [
+            {"name": c.get('name'), "value": c.get('value', '')}
+            for c in cookies
+        ] if cookies else []
+    }
 
-    # Forms with their fields
-    if forms:
-        lines.append("Forms:")
-        for f in forms:
-            method = f.get('method', 'GET')
-            action = f.get('action', '')
-            lines.append(f"  - {f.get('selector')} [{method}] action={action or '(same page)'}")
-            # Show form fields
-            for field in f.get('fields', []):
-                field_name = field.get('name') or field.get('id') or '(unnamed)'
-                field_type = field.get('type', 'text')
-                lines.append(f"      field: {field_name} type={field_type}")
-
-    # Interactive elements (inputs, buttons) - show selectors clearly
-    inputs = [e for e in elements if e.get('tag') in ['input', 'textarea', 'select']]
-    buttons = [e for e in elements if e.get('tag') == 'button' or e.get('type') == 'submit']
-
-    if inputs:
-        lines.append("Inputs:")
-        for e in inputs:
-            selector = e.get('selector', '?')
-            name = e.get('name', '')
-            etype = e.get('type', 'text')
-            placeholder = e.get('placeholder', '')
-            parts = [f"  - selector=\"{selector}\""]
-            if name:
-                parts.append(f"name=\"{name}\"")
-            parts.append(f"type={etype}")
-            if placeholder:
-                parts.append(f"placeholder=\"{placeholder}\"")
-            lines.append(" ".join(parts))
-
-    if buttons:
-        lines.append("Buttons:")
-        for e in buttons:
-            selector = e.get('selector', '?')
-            text = e.get('text', '').strip()[:30]
-            lines.append(f"  - selector=\"{selector}\" text=\"{text}\"")
-
-    if hints:
-        lines.append("Hints: " + "; ".join(hints))
-
-    if cookies:
-        lines.append("Cookies: " + ", ".join(f"{c.get('name')}={c.get('value', '')}" for c in cookies))
-
-    return "\n".join(lines)
+    return json.dumps(state, indent=2)
 
 
 @tool
@@ -435,60 +444,53 @@ async def analyze_page_visually() -> str:
 
 @tool
 async def list_interactive_elements() -> str:
-    """List all interactive elements on the page with their selectors.
+    """List all interactive elements on the page as JSON with selectors and metadata.
+
+    Returns JSON with:
+    - total: Total element count
+    - visible: List of visible elements
+    - hidden: List of hidden elements (important for CTF)
+
+    Each element includes: selector, tag, type, name, text, visible, reason (why interactive)
 
     Returns:
-        Formatted list of interactive elements.
+        JSON string with all interactive elements.
     """
+    import json
+
     browser = get_browser()
 
     if not browser.page:
-        return "Error: Browser not initialized"
+        return json.dumps({"error": "Browser not initialized"})
 
     elements = await extract_interactive_elements(browser.page)
 
-    visible = [e for e in elements if e.get("is_visible", True)]
-    hidden = [e for e in elements if not e.get("is_visible", True)]
+    visible = [e for e in elements if e.get("visible", True)]
+    hidden = [e for e in elements if not e.get("visible", True)]
 
-    lines = []
+    def format_element(e: dict) -> dict:
+        """Format element for JSON output."""
+        return {
+            "selector": e.get('selector'),
+            "tag": e.get('tag'),
+            "type": e.get('type'),
+            "name": e.get('name'),
+            "id": e.get('id'),
+            "text": (e.get('text') or '').strip()[:50],
+            "placeholder": e.get('placeholder'),
+            "value": e.get('value'),
+            "href": e.get('href'),
+            "visible": e.get('visible', True),
+            "reason": e.get('interactiveReason'),
+        }
 
-    def format_element(e: dict, index: int) -> str:
-        """Format a single element clearly."""
-        tag = e.get('tag', '?')
-        selector = e.get('selector', '?')
-        parts = [f"{index}. <{tag}> selector=\"{selector}\""]
+    result = {
+        "total": len(elements),
+        "visible": [format_element(e) for e in visible[:25]],
+        "hidden": [format_element(e) for e in hidden[:10]],
+    }
 
-        # Add relevant attributes based on element type
-        if e.get('name'):
-            parts.append(f"name=\"{e.get('name')}\"")
-        if e.get('type'):
-            parts.append(f"type={e.get('type')}")
-        if e.get('id'):
-            parts.append(f"id=\"{e.get('id')}\"")
-        if e.get('placeholder'):
-            parts.append(f"placeholder=\"{e.get('placeholder')}\"")
-        if e.get('value'):
-            parts.append(f"value=\"{e.get('value')}\"")
-        if e.get('text'):
-            text = e.get('text', '').strip()[:50]
-            if text:
-                parts.append(f"text=\"{text}\"")
-        if e.get('href'):
-            parts.append(f"href=\"{e.get('href')}\"")
-
-        return " ".join(parts)
-
-    if visible:
-        lines.append(f"Visible ({len(visible)}):")
-        for i, e in enumerate(visible, 1):
-            lines.append(f"  {format_element(e, i)}")
-
-    if hidden:
-        lines.append(f"Hidden ({len(hidden)}):")
-        for i, e in enumerate(hidden, 1):
-            lines.append(f"  {format_element(e, i)}")
-
-    return "\n".join(lines) if lines else "No interactive elements found."
+    return json.dumps(result, indent=2)
 
 
 @tool
