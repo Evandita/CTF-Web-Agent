@@ -44,8 +44,13 @@ class AgentState(TypedDict):
     # Challenge type classification
     challenge_type: str | None
 
+    # Exploitation context - tracks detected vulnerability info
+    # {"vuln_type": "ssti|sqli|cmdi|lfi", "selector": "#input", "confirmed": True}
+    exploitation_context: dict[str, Any] | None
+
     # Exploration queue - tracks interesting things to investigate
-    # Each item: {"type": "dir|file|path|payload", "target": "/path", "reason": "why interesting", "priority": 1-3}
+    # New format with LLM-generated instructions:
+    # {"target": "/path", "instruction": "Full instruction with tool call", "priority": 1-3}
     exploration_queue: list[dict[str, Any]]
 
 
@@ -82,6 +87,7 @@ def create_initial_state(
         needs_human_help=False,
         human_input=None,
         challenge_type=None,
+        exploitation_context=None,
         exploration_queue=[],
     )
 
@@ -89,8 +95,7 @@ def create_initial_state(
 def add_to_exploration_queue(
     state: AgentState,
     target: str,
-    item_type: str = "unknown",
-    reason: str = "",
+    instruction: str,
     priority: int = 2,
 ) -> list[dict[str, Any]]:
     """
@@ -98,9 +103,8 @@ def add_to_exploration_queue(
 
     Args:
         state: Current agent state.
-        target: The path/file/payload to explore.
-        item_type: Type of item ("dir", "file", "path", "payload", "url").
-        reason: Why this item is interesting.
+        target: Identifier for the item (path, URL, etc.).
+        instruction: Full LLM-generated instruction with tool call.
         priority: Priority level (1=high, 2=medium, 3=low).
 
     Returns:
@@ -113,9 +117,8 @@ def add_to_exploration_queue(
         return queue
 
     queue.append({
-        "type": item_type,
         "target": target,
-        "reason": reason,
+        "instruction": instruction,
         "priority": priority,
     })
 
@@ -160,9 +163,10 @@ def format_exploration_queue(state: AgentState) -> str:
 
     lines = ["Pending exploration queue:"]
     for i, item in enumerate(queue, 1):
-        priority_label = {1: "HIGH", 2: "MED", 3: "LOW"}.get(item["priority"], "?")
-        lines.append(f"  {i}. [{priority_label}] {item['type']}: {item['target']}")
-        if item.get("reason"):
-            lines.append(f"      Reason: {item['reason']}")
+        priority_label = {1: "HIGH", 2: "MED", 3: "LOW"}.get(item.get("priority", 2), "?")
+        target = item.get("target", "unknown")
+        instruction = item.get("instruction", "no instruction")
+        lines.append(f"  {i}. [{priority_label}] {target}")
+        lines.append(f"      -> {instruction[:100]}{'...' if len(instruction) > 100 else ''}")
 
     return "\n".join(lines)

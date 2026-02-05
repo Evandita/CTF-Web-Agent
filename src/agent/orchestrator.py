@@ -9,10 +9,10 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
 from .state import AgentState, create_initial_state
-from .prompts import SYSTEM_PROMPT, format_planning_prompt, format_reflection_prompt, format_queue_prompt
+from .prompts import SYSTEM_PROMPT, format_planning_prompt, format_reflection_prompt, format_discovery_prompt
 from ..browser.controller import BrowserController
 from ..browser.tools import ALL_TOOLS, set_browser_controller, set_exploration_queue, get_exploration_queue
-from ..browser.extractors import extract_interactive_elements, extract_html_hints
+from ..browser.extractors import extract_interactive_elements, extract_html_hints, extract_forms
 from ..models.ollama_client import get_text_model
 from ..utils.flag_detector import detect_flag_in_page
 from ..utils.logger import (
@@ -25,6 +25,8 @@ from ..utils.logger import (
     log_iteration,
     log_tool_call,
     log_tool_result,
+    log_prompt,
+    log_response,
 )
 from ..config import get_settings
 
@@ -174,11 +176,13 @@ class CTFOrchestrator:
         graph.add_node("plan", self._plan_node)
         graph.add_node("execute", ToolNode(self.tools))
         graph.add_node("check_result", self._check_result_node)
+        graph.add_node("discovery", self._discovery_node)
 
         # Set entry point
         graph.set_entry_point("analyze")
 
         # Add edges
+        # Flow: analyze → plan → execute → check_result → discovery → analyze
         graph.add_edge("analyze", "plan")
         graph.add_conditional_edges(
             "plan",
@@ -191,12 +195,13 @@ class CTFOrchestrator:
         graph.add_edge("execute", "check_result")
         graph.add_conditional_edges(
             "check_result",
-            self._should_continue,
+            self._should_continue_to_discovery,
             {
-                "continue": "analyze",
+                "discovery": "discovery",
                 "end": END,
             }
         )
+        graph.add_edge("discovery", "analyze")
 
         return graph.compile()
 
@@ -205,6 +210,7 @@ class CTFOrchestrator:
         Analyze the current page state.
 
         Gathers information from the page and prepares context for planning.
+        Also builds a JSON page state that will be injected into the LLM prompt.
         """
         iteration = state["iteration"] + 1
         settings = get_settings()
@@ -219,6 +225,7 @@ class CTFOrchestrator:
             url = self.browser.get_current_url()
             title = await self.browser.page.title()
             elements = await extract_interactive_elements(self.browser.page)
+            forms = await extract_forms(self.browser.page)
             hints = await extract_html_hints(self.browser.page)
             cookies = await self.browser.get_cookies()
             local_storage = await self.browser.get_local_storage()
@@ -249,10 +256,69 @@ class CTFOrchestrator:
             log_observation(f"Analyzing page: {url}")
             log_observation(f"Found {len(elements)} interactive elements, {len(hints)} hints")
 
+            # Build JSON page state for LLM context injection
+            visible_elements = [e for e in elements if e.get("visible", True)]
+            hidden_elements = [e for e in elements if not e.get("visible", True)]
+
+            page_state_json = {
+                "url": url,
+                "title": title,
+                "elements": {
+                    "total": len(elements),
+                    "visible_count": len(visible_elements),
+                    "hidden_count": len(hidden_elements),
+                    "visible": [
+                        {
+                            "selector": e.get("selector"),
+                            "tag": e.get("tag"),
+                            "type": e.get("type"),
+                            "name": e.get("name"),
+                            "text": (e.get("text") or "")[:50],
+                            "placeholder": e.get("placeholder"),
+                            "value": e.get("value"),
+                            "reason": e.get("interactiveReason"),
+                        }
+                        for e in visible_elements[:25]
+                    ],
+                    "hidden": [
+                        {
+                            "selector": e.get("selector"),
+                            "tag": e.get("tag"),
+                            "type": e.get("type"),
+                            "name": e.get("name"),
+                            "text": (e.get("text") or "")[:50],
+                            "reason": e.get("interactiveReason"),
+                        }
+                        for e in hidden_elements[:10]
+                    ],
+                },
+                "forms": [
+                    {
+                        "selector": f.get("selector"),
+                        "method": f.get("method", "GET"),
+                        "action": f.get("action"),
+                        "fields": [
+                            {"name": field.get("name"), "type": field.get("type", "text")}
+                            for field in f.get("fields", [])
+                        ],
+                    }
+                    for f in forms
+                ],
+                "hints": hints[:20],
+                "cookies": [
+                    {"name": c.get("name"), "value": c.get("value", "")}
+                    for c in cookies
+                ] if cookies else [],
+            }
+
+            # Store as formatted JSON string for prompt injection
+            page_analysis = json.dumps(page_state_json, indent=2)
+
             return {
                 "iteration": iteration,
                 "current_url": url,
                 "page_title": title,
+                "page_analysis": page_analysis,
                 "interactive_elements": elements,
                 "html_hints": hints,
                 "cookies": cookies,
@@ -266,6 +332,7 @@ class CTFOrchestrator:
         Plan the next action using the LLM.
 
         Decides what tool to call based on current state.
+        Page state is automatically injected - no need for LLM to call get_page_state.
         """
         # Check if flag already found
         if state.get("flag_found"):
@@ -278,15 +345,18 @@ class CTFOrchestrator:
 
         # Check if we have queue items to process first
         queue = state.get("exploration_queue", [])
+        dequeued_item = None
         if queue:
-            # Use queue-specific prompt for the first item
+            # Use LLM-generated instruction from the first queue item
             first_item = queue[0]
-            queue_prompt = format_queue_prompt(first_item["type"], first_item["target"])
-            if queue_prompt:
-                context_prompt = queue_prompt
-                log_observation(f"Processing queue: {first_item['type']}:{first_item['target']}")
+            instruction = first_item.get("instruction")
+            if instruction:
+                context_prompt = f"Execute this task: {instruction}"
+                log_observation(f"Processing queue: {first_item.get('target', 'unknown')}")
+                # Dequeue this item (will be returned in state update)
+                dequeued_item = first_item
             else:
-                # Unknown queue type, fall back to normal planning
+                # No instruction, fall back to normal planning
                 context_prompt = format_planning_prompt(
                     iteration=state["iteration"],
                     max_iterations=state["max_iterations"],
@@ -311,8 +381,27 @@ class CTFOrchestrator:
         if state["iteration"] == 1:
             messages.append(SystemMessage(content=SYSTEM_PROMPT))
 
-        # Add current context
-        messages.append(HumanMessage(content=f"{context_prompt}"))
+        # Build the prompt with auto-injected page state
+        # This eliminates the need for LLM to call get_page_state as a tool
+        page_state = state.get("page_analysis", "")
+        if page_state:
+            full_prompt = f"""## Current Page State (auto-extracted)
+```json
+{page_state}
+```
+
+## Your Task
+{context_prompt}
+
+Based on the page state above, decide what action to take next. Call the appropriate tool directly"""
+        else:
+            full_prompt = context_prompt
+
+        # Add current context with page state
+        messages.append(HumanMessage(content=full_prompt))
+
+        # Log the prompt for debugging
+        log_prompt(full_prompt, "PLAN")
 
         log_thinking("Planning next action...")
 
@@ -323,6 +412,13 @@ class CTFOrchestrator:
             log_error(f"LLM invocation failed: {e}")
             # Return empty response to trigger retry on next iteration
             return {"messages": [], "error_count": state["error_count"] + 1}
+
+        # Log the response for debugging
+        response_text = str(response.content) if response.content else ""
+        if hasattr(response, "tool_calls") and response.tool_calls:
+            tool_info = [{"name": tc["name"], "args": tc.get("args", {})} for tc in response.tool_calls]
+            response_text += f"\n[Tool calls: {tool_info}]"
+        log_response(response_text, "PLAN")
 
         # Log thinking (model's reasoning)
         if response.content:
@@ -355,7 +451,17 @@ class CTFOrchestrator:
             log_error("No tool calls generated by LLM.")
             log_observation("The model may not support function calling or didn't decide to use a tool.")
 
-        return {"messages": [response]}
+        # Build return state
+        result = {"messages": [response]}
+
+        # If we dequeued an item, update the queue
+        if dequeued_item:
+            updated_queue = [item for item in queue if item["target"] != dequeued_item["target"]]
+            result["exploration_queue"] = updated_queue
+            set_exploration_queue(updated_queue)
+            log_observation(f"Dequeued: {dequeued_item['target']} ({len(updated_queue)} remaining)")
+
+        return result
 
     async def _check_result_node(self, state: AgentState) -> dict:
         """
@@ -420,6 +526,145 @@ class CTFOrchestrator:
             "exploration_queue": current_queue,
         }
 
+    async def _discovery_node(self, state: AgentState) -> dict:
+        """
+        Analyze tool results and extract discoveries to queue.
+
+        Uses LLM to identify interesting paths, files, URLs from tool output.
+        Automatically manages the exploration queue.
+        Also extracts and updates exploitation context (vuln type, selector).
+        """
+        # Skip if flag found
+        if state.get("flag_found"):
+            return {}
+
+        # Get the last tool result
+        messages = state["messages"]
+        last_tool_result = None
+        last_tool_name = None
+
+        for msg in reversed(messages):
+            if isinstance(msg, ToolMessage):
+                last_tool_result = msg.content
+                last_tool_name = msg.name
+                break
+
+        # Skip discovery if no tool result or certain tool types
+        skip_tools = {"check_for_flag", "request_human_help", "get_page_state", "list_interactive_elements", "try_common_payloads"}
+        if not last_tool_result or last_tool_name in skip_tools:
+            return {}
+
+        result_str = str(last_tool_result)
+
+        # Skip if result is too short (likely an error or empty)
+        if len(result_str) < 50:
+            return {}
+
+        # Skip discovery if result shows empty output (no paths to extract)
+        if "Output: (empty" in result_str or "File may not exist" in result_str:
+            return {}
+
+        # Only run discovery if the result looks like it contains actual paths
+        # (directory listings typically have drwx, -rw, or path-like patterns)
+        has_directory_listing = any(pattern in result_str for pattern in [
+            "drwx", "-rw-", "total ", "lrwx",  # ls -la output indicators
+            ".txt", ".py", ".php", ".html", ".conf",  # file extensions
+        ])
+        has_path_output = "/" in result_str and len(result_str) > 100
+
+        if not has_directory_listing and not has_path_output:
+            return {}
+
+        current_queue = state.get("exploration_queue", [])
+        exploitation_context = state.get("exploitation_context") or {}
+
+        # Extract exploitation context from tool results (e.g., try_common_payloads)
+        # Look for vulnerability confirmation patterns
+        if "SSTI CONFIRMED" in result_str or "ssti" in last_tool_name.lower():
+            exploitation_context["vuln_type"] = "ssti"
+            exploitation_context["confirmed"] = True
+            # Try to extract selector from the result
+            selector_match = re.search(r"fill_input\(['\"]([^'\"]+)['\"]", result_str)
+            if selector_match:
+                exploitation_context["selector"] = selector_match.group(1)
+        elif "SQL" in result_str.upper() and ("injection" in result_str.lower() or "error" in result_str.lower()):
+            exploitation_context["vuln_type"] = "sqli"
+        elif "command" in result_str.lower() and ("injection" in result_str.lower() or "executed" in result_str.lower()):
+            exploitation_context["vuln_type"] = "cmdi"
+
+        # Add URL to context
+        exploitation_context["url"] = state.get("current_url", "")
+
+        # Build discovery prompt with exploitation context
+        discovery_prompt = format_discovery_prompt(
+            tool_result=result_str,
+            current_queue=current_queue,
+            exploitation_context=exploitation_context if exploitation_context else None,
+        )
+
+        # Log the discovery prompt for debugging
+        log_prompt(discovery_prompt, "DISCOVERY")
+
+        log_thinking("Analyzing results for discoveries...")
+
+        try:
+            # Use base LLM (no tools) for discovery - faster and simpler
+            response = await self.llm.ainvoke([
+                HumanMessage(content=discovery_prompt)
+            ])
+
+            # Parse JSON array from response
+            content = response.content
+
+            # Log the discovery response
+            log_response(str(content) if content else "(empty)", "DISCOVERY")
+
+            if not content:
+                return {}
+
+            # Extract JSON array from response
+            json_match = re.search(r'\[\s*\{.*?\}\s*\]|\[\s*\]', content, re.DOTALL)
+            if json_match:
+                try:
+                    new_items = json.loads(json_match.group())
+
+                    if new_items and isinstance(new_items, list):
+                        # Filter out items already in queue
+                        existing_targets = {item["target"] for item in current_queue}
+                        filtered_items = [
+                            item for item in new_items
+                            if isinstance(item, dict)
+                            and item.get("target")
+                            and item["target"] not in existing_targets
+                        ]
+
+                        if filtered_items:
+                            # Add new items to queue
+                            updated_queue = current_queue + filtered_items
+                            # Sort by priority
+                            updated_queue.sort(key=lambda x: x.get("priority", 2))
+
+                            log_observation(f"Queued {len(filtered_items)} new items: {[i.get('target', '?') for i in filtered_items]}")
+
+                            # Sync to tools
+                            set_exploration_queue(updated_queue)
+
+                            return {
+                                "exploration_queue": updated_queue,
+                                "exploitation_context": exploitation_context if exploitation_context else None,
+                            }
+                except json.JSONDecodeError:
+                    pass
+
+        except Exception as e:
+            log_error(f"Discovery analysis failed: {e}")
+
+        # Return exploitation context even if no new queue items
+        if exploitation_context:
+            return {"exploitation_context": exploitation_context}
+
+        return {}
+
     def _should_execute(self, state: AgentState) -> Literal["execute", "end"]:
         """Determine if we should execute a tool or end."""
         # End if flag found
@@ -439,8 +684,8 @@ class CTFOrchestrator:
 
         return "end"
 
-    def _should_continue(self, state: AgentState) -> Literal["continue", "end"]:
-        """Determine if we should continue or end after checking results."""
+    def _should_continue_to_discovery(self, state: AgentState) -> Literal["discovery", "end"]:
+        """Determine if we should continue to discovery or end after checking results."""
         # End if flag found
         if state.get("flag_found"):
             log_action("Challenge solved!", f"Flag: {state['flag_found']}")
@@ -451,8 +696,8 @@ class CTFOrchestrator:
             log_error("Maximum iterations reached without finding flag")
             return "end"
 
-        # Continue otherwise
-        return "continue"
+        # Continue to discovery node
+        return "discovery"
 
     async def solve(self, challenge_url: str) -> dict:
         """

