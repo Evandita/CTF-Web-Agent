@@ -689,72 +689,6 @@ async def extract_interactive_elements(page: Page) -> list[dict[str, Any]]:
         return []
 
 
-async def extract_interactive_elements_summary(page: Page) -> str:
-    """
-    Extract interactive elements and format as a concise summary for LLM.
-
-    Args:
-        page: Playwright page instance.
-
-    Returns:
-        Formatted string summarizing interactive elements.
-    """
-    elements = await extract_interactive_elements(page)
-
-    if not elements:
-        return "No interactive elements found."
-
-    lines = []
-    visible_count = 0
-    hidden_count = 0
-
-    for i, el in enumerate(elements):
-        is_visible = el.get('visible', True)
-        if is_visible:
-            visible_count += 1
-        else:
-            hidden_count += 1
-
-        # Build concise element description
-        tag = el.get('tag', '?')
-        selector = el.get('selector', '')
-        text = el.get('text', '')[:50]
-        el_type = el.get('type', '')
-        role = el.get('role', '')
-        reason = el.get('interactiveReason', '')
-
-        # Format: [V/H] tag#id.class "text" (type) [role] -> selector | reason
-        visibility = 'V' if is_visible else 'H'
-        parts = [f"[{visibility}]", tag]
-
-        if el.get('id'):
-            parts.append(f"#{el['id']}")
-        elif el.get('name'):
-            parts.append(f"[name={el['name']}]")
-
-        if text:
-            parts.append(f'"{text}"')
-        if el_type:
-            parts.append(f"({el_type})")
-        if role:
-            parts.append(f"[{role}]")
-
-        parts.append(f"-> {selector}")
-
-        if reason and reason not in ['interactive_tag']:
-            parts.append(f"| {reason}")
-
-        lines.append(' '.join(parts))
-
-    summary = f"Found {len(elements)} interactive elements ({visible_count} visible, {hidden_count} hidden):\n"
-    summary += '\n'.join(lines[:50])  # Limit to 50 elements
-
-    if len(elements) > 50:
-        summary += f"\n... and {len(elements) - 50} more elements"
-
-    return summary
-
-
 async def extract_html_hints(page: Page) -> list[str]:
     """
     Extract hints from HTML including comments, hidden fields, etc.
@@ -923,59 +857,6 @@ async def get_page_summary(page: Page) -> dict[str, Any]:
     }
 
     return summary
-
-
-async def get_page_state_for_llm(page: Page) -> str:
-    """
-    Get a formatted page state optimized for LLM consumption.
-
-    This provides a concise but comprehensive view of the page that's
-    suitable for including in an LLM prompt.
-
-    Args:
-        page: Playwright page instance.
-
-    Returns:
-        Formatted string with page state.
-    """
-    parts = []
-
-    # Basic info
-    parts.append(f"URL: {page.url}")
-    try:
-        title = await page.title()
-        if title:
-            parts.append(f"Title: {title}")
-    except Exception:
-        pass
-
-    # Interactive elements summary
-    parts.append("\n## Interactive Elements")
-    elements_summary = await extract_interactive_elements_summary(page)
-    parts.append(elements_summary)
-
-    # Forms
-    forms = await extract_forms(page)
-    if forms:
-        parts.append(f"\n## Forms ({len(forms)} found)")
-        for form in forms[:5]:
-            action = form.get('action', 'none')
-            method = form.get('method', 'GET')
-            selector = form.get('selector', '')
-            fields = form.get('fields', [])
-            field_names = [f.get('name') or f.get('type', 'unnamed') for f in fields[:5]]
-            parts.append(f"  {method} {action} ({selector}): {', '.join(field_names)}")
-
-    # Hints (CTF-specific)
-    hints = await extract_html_hints(page)
-    if hints:
-        parts.append(f"\n## HTML Hints ({len(hints)} found)")
-        for hint in hints[:20]:
-            parts.append(f"  {hint}")
-        if len(hints) > 20:
-            parts.append(f"  ... and {len(hints) - 20} more hints")
-
-    return '\n'.join(parts)
 
 
 async def extract_all_text_content(page: Page) -> str:

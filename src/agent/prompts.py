@@ -1,132 +1,195 @@
-"""System prompts for the CTF orchestrator agent."""
+"""System prompts for the CTF orchestrator agent - ReAct format."""
 
-SYSTEM_PROMPT = """You are a CTF web challenge solver. Find the hidden flag by exploiting web vulnerabilities.
+import json
+from typing import Any
 
-## Tools
-- `try_common_payloads(selector, type)` - Detect vulnerability (ssti/sqli/cmdi/lfi). Use ONCE.
-- `fill_input(selector, value)` - Fill input and submit. Main exploitation tool.
-- `go_back()` - Return to previous page.
-- `check_for_flag()` - Search for flag patterns.
+# =============================================================================
+# MAIN SYSTEM PROMPT - No payload examples (retrieved via RAG)
+# =============================================================================
 
-## Workflow
-1. Detect vulnerability with try_common_payloads
-2. Exploit with fill_input using appropriate payloads
-3. **ALWAYS list directories before reading files** - use `ls -la /` first
-4. Only read files you have SEEN in directory listings
+SYSTEM_PROMPT = """You are an expert CTF (Capture The Flag) web challenge solver. Your goal is to find the hidden flag on web pages by identifying and exploiting vulnerabilities.
+
+## CRITICAL: Response Format (ReAct Pattern)
+
+You MUST follow this format for EVERY response:
+
+1. **REASONING** (required text output): Write 2-4 sentences explaining:
+   - What you observe on the current page
+   - What vulnerability type you suspect (if any)
+   - Why you're choosing the next action
+   - What you expect to learn/achieve
+
+2. **ACTION** (tool call): Then call exactly ONE tool with correct parameters
+
+Example reasoning (write this BEFORE calling the tool):
+"The page title 'SSTI1' strongly suggests Server-Side Template Injection. I see a form with an input field. I should retrieve SSTI payloads first to know what detection and exploitation techniques to use."
+
+Then INVOKE the tool using the function calling mechanism (not as text).
+
+IMPORTANT: After writing your reasoning, you MUST actually invoke the tool - do not write the tool call as text!
+
+## Available Tools
+
+### Browser Navigation
+- `navigate_to_url(url)` - Go to a URL
+- `go_back()` - Navigate back in history
+- `scroll_page(direction)` - Scroll "up" or "down"
+
+### Page Interaction
+- `fill_input(selector, value)` - Fill an input and submit. This is your MAIN exploitation tool.
+- `click_element(selector)` - Click an element
+- `execute_javascript(code)` - Run JS in page context
+
+### Information Gathering
+- `get_page_state()` - Get full page state as JSON
+- `check_for_flag()` - Search page for flag patterns
+- `get_page_source()` - Get raw HTML source
+- `get_cookies()` - Get all cookies
+- `get_local_storage()` - Get localStorage data
+
+### Payload Knowledge (RAG)
+- `get_payload_suggestions(vuln_type)` - Retrieve payload suggestions for a vulnerability type
+  - Use this FIRST when you identify a vulnerability type
+  - Available types: ssti, sqli, cmdi, lfi, xss, path_traversal
+  - Returns detection and exploitation payloads
 
 ## Critical Rules
-- **NEVER guess file paths** - only use paths from actual command output
-- Start with `ls -la /` to see root directory, then explore what you find
-- Empty output = file/path doesn't exist, try a different path
-- Flag formats: flag{}, CTF{}, picoCTF{}, HTB{}"""
+
+1. **Use exact selectors** - Always use selectors from the page state
+
+2. **Don't repeat failed payloads** - If a payload returns empty/error, try a DIFFERENT one
+
+3. **Retrieve payloads via RAG** - Always call `get_payload_suggestions()` before exploiting
+
+4. **Read the output** - The flag might already be in the tool result!
+
+5. **Enumerate before reading** - List directories first, then read specific files
+
+## Flag Formats
+Flags typically look like: `flag{...}`, `CTF{...}`, `picoCTF{...}`, `HTB{...}`, `THM{...}`
+
+Remember: Each fill_input submits the form and shows you the OUTPUT. Read it carefully!"""
 
 
-ANALYSIS_PROMPT = """Analyze the page. What vulnerability type? What elements to target? Next action?"""
+def _detect_vuln_from_title(title: str) -> str | None:
+    """Detect vulnerability type from page title."""
+    title_lower = title.lower()
+
+    if "ssti" in title_lower or "template" in title_lower:
+        return "ssti"
+    if "sqli" in title_lower or "sql" in title_lower or "injection" in title_lower:
+        return "sqli"
+    if "xss" in title_lower or "script" in title_lower:
+        return "xss"
+    if "lfi" in title_lower or "file inclusion" in title_lower:
+        return "lfi"
+    if "cmdi" in title_lower or "command" in title_lower or "rce" in title_lower:
+        return "cmdi"
+    if "traversal" in title_lower or "path" in title_lower:
+        return "path_traversal"
+
+    return None
 
 
-PLANNING_PROMPT = """Iteration {iteration}/{max_iterations}. Errors: {error_count}. Type: {challenge_type}.
-What's your next action?"""
-
-
-REFLECTION_PROMPT = """Your recent approaches aren't working. Try a different vulnerability type or approach."""
-
-
-STUCK_PROMPT = """Stuck after {error_count} errors. Consider: other vuln types, robots.txt, cookies, page source. Use request_human_help if truly stuck."""
-
-
-# Discovery prompt for extracting findings from tool results
-# CRITICAL: Only extract paths that are ACTUALLY visible in the tool result
-DISCOVERY_PROMPT = """Extract paths from the tool result to explore next.
-
-## Context
-{exploitation_context}
-
-## Tool Result
-{tool_result}
-
-## Current Queue
-{current_queue}
-
-## Rules
-1. **ONLY extract paths that are EXPLICITLY shown in the tool result above**
-2. **NEVER guess or invent paths** - if you don't see it in the output, don't add it
-3. If the result is empty or shows an error, return empty array []
-4. If no vulnerability confirmed yet, return empty array []
-
-## What to Look For
-- Directory listings (ls output): extract directory and file names you SEE
-- Error messages: may reveal actual paths
-- If you see a directory, queue it for listing (ls -la)
-- If you see a file that might contain a flag, queue it for reading (cat)
-
-## Response Format
-Return ONLY a JSON array (empty if nothing found):
-```json
-[
-  {{"target": "/actual/path/from/output", "instruction": "fill_input(selector, payload)", "priority": 1}}
-]
-```
-
-Priority: 1=flag-related, 2=interesting, 3=general
-
-**IMPORTANT: Empty array [] if the tool result doesn't show any new paths to explore.**"""
-
-
-def format_discovery_prompt(
-    tool_result: str,
-    current_queue: list,
-    exploitation_context: dict | None = None,
-) -> str:
-    """Format the discovery prompt with tool result, queue, and exploitation context."""
-    queue_str = "Empty" if not current_queue else "\n".join(
-        f"- [P{item.get('priority', 2)}] {item.get('target')}: {item.get('instruction', 'no instruction')[:80]}..."
-        for item in current_queue
-    )
-
-    # Build exploitation context string
-    if exploitation_context:
-        ctx_lines = []
-        if exploitation_context.get("vuln_type"):
-            ctx_lines.append(f"Vulnerability: {exploitation_context['vuln_type']}")
-        if exploitation_context.get("selector"):
-            ctx_lines.append(f"Input Selector: {exploitation_context['selector']}")
-        if exploitation_context.get("url"):
-            ctx_lines.append(f"URL: {exploitation_context['url']}")
-        context_str = "\n".join(ctx_lines) if ctx_lines else "Not yet determined"
-    else:
-        context_str = "Not yet determined - analyze the tool result to infer"
-
-    return DISCOVERY_PROMPT.format(
-        tool_result=tool_result[:2000],  # Limit to avoid token overflow
-        current_queue=queue_str,
-        exploitation_context=context_str,
-    )
-
-
-def format_planning_prompt(
+def format_page_context(
+    url: str,
+    title: str,
+    elements: list[dict[str, Any]],
+    forms: list[dict[str, Any]],
+    hints: list[str],
+    cookies: list[dict[str, Any]],
     iteration: int,
     max_iterations: int,
-    challenge_type: str | None,
-    error_count: int,
 ) -> str:
-    """Format the planning prompt with current state."""
-    return PLANNING_PROMPT.format(
-        iteration=iteration,
-        max_iterations=max_iterations,
-        challenge_type=challenge_type or "?",
-        error_count=error_count,
-    )
+    """
+    Format the current page state and action history as context for the agent.
+
+    This becomes the HumanMessage content that provides current state.
+    """
+    # Detect vulnerability from title
+    detected_vuln = _detect_vuln_from_title(title)
+
+    # Format elements
+    visible_elements = [e for e in elements if e.get("visible", True)]
+    hidden_elements = [e for e in elements if not e.get("visible", True)]
+
+    elements_json = {
+        "visible": [
+            {
+                "selector": e.get("selector"),
+                "tag": e.get("tag"),
+                "type": e.get("type"),
+                "name": e.get("name"),
+                "text": (e.get("text") or "")[:50],
+                "placeholder": e.get("placeholder"),
+                "value": e.get("value"),
+            }
+            for e in visible_elements[:20]
+        ],
+        "hidden": [
+            {
+                "selector": e.get("selector"),
+                "tag": e.get("tag"),
+                "name": e.get("name"),
+            }
+            for e in hidden_elements[:5]
+        ],
+    }
+
+    # Format forms
+    forms_json = [
+        {
+            "selector": f.get("selector"),
+            "method": f.get("method", "GET"),
+            "action": f.get("action"),
+            "fields": [
+                {"name": field.get("name"), "type": field.get("type", "text")}
+                for field in f.get("fields", [])
+            ],
+        }
+        for f in forms
+    ]
+
+    # Build vulnerability hint if detected
+    vuln_hint = ""
+    if detected_vuln:
+        vuln_hint = f"""
+### Detected Vulnerability
+Based on page title "{title}", this appears to be a **{detected_vuln.upper()}** challenge.
+**Recommended next action**: `get_payload_suggestions("{detected_vuln}")`
+"""
+
+    # Build the context message
+    context = f"""## Current State (Iteration {iteration}/{max_iterations})
+
+**URL**: {url}
+**Page Title**: {title}
+{vuln_hint}
+### Interactive Elements
+```json
+{json.dumps(elements_json, indent=2)}
+```
+
+### Forms
+```json
+{json.dumps(forms_json, indent=2)}
+```
+
+### Hints Found
+{chr(10).join(f'- {h}' for h in hints[:10]) if hints else 'None'}
+
+### Cookies
+{chr(10).join(f'- {c.get("name")}={c.get("value", "")[:50]}' for c in cookies[:5]) if cookies else 'None'}
+
+---
+
+Based on the current page state, decide what to do next.
+If you identified a vulnerability type, use `get_payload_suggestions(vuln_type)` to retrieve relevant payloads.
+Call exactly ONE tool."""
+
+    return context
 
 
-def format_reflection_prompt() -> str:
-    """Format the reflection prompt."""
-    return REFLECTION_PROMPT
-
-
-def format_stuck_prompt(
-    error_count: int,
-) -> str:
-    """Format the stuck prompt with current state."""
-    return STUCK_PROMPT.format(
-        error_count=error_count,
-    )
+def get_system_prompt() -> str:
+    """Get the system prompt for the CTF agent."""
+    return SYSTEM_PROMPT
