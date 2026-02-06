@@ -36,34 +36,38 @@ IMPORTANT: After writing your reasoning, you MUST actually invoke the tool - do 
 - `scroll_page(direction)` - Scroll "up" or "down"
 
 ### Page Interaction
-- `fill_input(selector, value)` - Fill an input and submit. This is your MAIN exploitation tool.
+- `fill_input(fields, submit=true)` - Fill input field(s) and optionally submit. This is your MAIN exploitation tool.
+  - fields: dict of selector-value pairs, e.g. {"#input": "payload"} or {"#user": "admin", "#pass": "123"}
+  - submit: true to press Enter (default), false to just fill without submitting
 - `click_element(selector)` - Click an element
 - `execute_javascript(code)` - Run JS in page context
 
 ### Information Gathering
-- `get_page_state()` - Get full page state as JSON
 - `check_for_flag()` - Search page for flag patterns
-- `get_page_source()` - Get raw HTML source
 - `get_cookies()` - Get all cookies
 - `get_local_storage()` - Get localStorage data
 
 ### Payload Knowledge (RAG)
 - `get_payload_suggestions(vuln_type)` - Retrieve payload suggestions for a vulnerability type
-  - Use this FIRST when you identify a vulnerability type
-  - Available types: ssti, sqli, cmdi, lfi, xss, path_traversal
+  - ONLY use when you have identified a specific vulnerability type
+  - Available types: ssti, sqli, cmdi, lfi, xss, path_traversal, sensitive_paths
   - Returns detection and exploitation payloads
 
 ## Critical Rules
 
-1. **Use exact selectors** - Always use selectors from the page state
+1. **Use exact selectors** - Always use selectors from the Interactive Elements list
 
-2. **Don't repeat failed payloads** - If a payload returns empty/error, try a DIFFERENT one
+2. **Don't fill hidden fields** - Hidden inputs (like csrf_token) are handled automatically by the browser. Only fill VISIBLE inputs shown in the elements list
 
-3. **Retrieve payloads via RAG** - Always call `get_payload_suggestions()` before exploiting
+3. **Don't repeat failed payloads** - If a payload returns empty/error, try a DIFFERENT one
 
-4. **Read the output** - The flag might already be in the tool result!
+4. **No obvious vulnerability? Interact first!** - If the page title doesn't hint at a vulnerability type, try interacting with the page elements (fill forms with test data, click buttons, explore links) to discover the vulnerability type
 
-5. **Enumerate before reading** - List directories first, then read specific files
+5. **Read the output** - The flag might already be in the tool result!
+
+6. **Enumerate before reading** - List directories first, then read specific files
+
+7. **RAG requires a vuln_type** - Only call `get_payload_suggestions(vuln_type)` AFTER you know the vulnerability type (e.g., "sqli", "ssti"). If unsure, interact with the page first to discover it
 
 ## Flag Formats
 Flags typically look like: `flag{...}`, `CTF{...}`, `picoCTF{...}`, `HTB{...}`, `THM{...}`
@@ -109,32 +113,20 @@ def format_page_context(
     # Detect vulnerability from title
     detected_vuln = _detect_vuln_from_title(title)
 
-    # Format elements
+    # Only show visible elements - hidden elements can't be filled and are shown in Hints
     visible_elements = [e for e in elements if e.get("visible", True)]
-    hidden_elements = [e for e in elements if not e.get("visible", True)]
-
-    elements_json = {
-        "visible": [
-            {
-                "selector": e.get("selector"),
-                "tag": e.get("tag"),
-                "type": e.get("type"),
-                "name": e.get("name"),
-                "text": (e.get("text") or "")[:50],
-                "placeholder": e.get("placeholder"),
-                "value": e.get("value"),
-            }
-            for e in visible_elements[:20]
-        ],
-        "hidden": [
-            {
-                "selector": e.get("selector"),
-                "tag": e.get("tag"),
-                "name": e.get("name"),
-            }
-            for e in hidden_elements[:5]
-        ],
-    }
+    elements_json = [
+        {
+            "selector": e.get("selector"),
+            "tag": e.get("tag"),
+            "type": e.get("type"),
+            "name": e.get("name"),
+            "text": (e.get("text") or "")[:50],
+            "placeholder": e.get("placeholder"),
+            "value": e.get("value"),
+        }
+        for e in visible_elements[:20]
+    ]
 
     # Format forms
     forms_json = [
@@ -182,10 +174,8 @@ Based on page title "{title}", this appears to be a **{detected_vuln.upper()}** 
 {chr(10).join(f'- {c.get("name")}={c.get("value", "")[:50]}' for c in cookies[:5]) if cookies else 'None'}
 
 ---
-
-Based on the current page state, decide what to do next.
-If you identified a vulnerability type, use `get_payload_suggestions(vuln_type)` to retrieve relevant payloads.
-Call exactly ONE tool."""
+{"**NOTE**: This page has NO interactive elements. If you need to submit more payloads, use `go_back()` to return to the previous page with the input form." if not visible_elements else ""}
+Based on the current page state, decide what to do next. Call exactly ONE tool."""
 
     return context
 

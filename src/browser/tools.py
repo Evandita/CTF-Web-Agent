@@ -90,47 +90,74 @@ async def scroll_page(direction: str) -> str:
 # =============================================================================
 
 @tool
-async def fill_input(selector: str, value: str) -> str:
-    """Fill an input field with a value and submit by pressing Enter.
+async def fill_input(fields: dict[str, str], submit: bool = True) -> str:
+    """Fill one or more input fields and optionally submit the form.
 
     This is your MAIN exploitation tool. Use payloads from get_payload_suggestions().
 
     IMPORTANT:
-    - The form is automatically submitted after filling
     - The OUTPUT is returned - READ IT CAREFULLY, the flag might be there!
-    - If the page changes and has no inputs, it automatically navigates back
+    - Use submit=true (default) to press Enter after filling
+    - Use submit=false when you need to fill multiple fields before submitting
 
     Args:
-        selector: CSS selector for the input element (from page state)
-        value: The value/payload to fill (get payloads from get_payload_suggestions)
+        fields: Dictionary of selector-value pairs to fill.
+            Single field: {"#input_id": "payload_value"}
+            Multiple fields: {"#username": "admin", "#password": "password123"}
+        submit: Whether to press Enter to submit after filling (default: true)
 
     Returns:
-        The page output after submission. Check this for command results or flags!
+        The page output after filling/submission. Check this for command results or flags!
+
+    Examples:
+        - Single field SSTI: fields={"#announce": "{{7*7}}"}
+        - Login form: fields={"#username": "admin'--", "#password": "anything"}
     """
     browser = get_browser()
-    original_url = browser.get_current_url()
 
-    # Clear and fill the input
-    try:
-        await browser.page.fill(selector, "")
-    except Exception:
-        pass  # Input might not be clearable
+    if not isinstance(fields, dict):
+        return "Error: fields must be a dictionary with selector-value pairs"
 
-    result = await browser.fill(selector, value)
+    if not fields:
+        return "Error: fields cannot be empty"
 
-    # Press Enter to submit
-    await browser.press_key("Enter")
+    # Fill each field
+    filled_fields = []
+    for selector, value in fields.items():
+        try:
+            # First check if the element exists (with short timeout)
+            element = await browser.page.wait_for_selector(selector, timeout=3000)
+            if not element:
+                return f"Error: Element '{selector}' not found. Check the selector - use exact selectors from the page state (e.g., 'input[name=\"otp\"]' not '#otp')."
 
-    # Wait for response
-    await browser.page.wait_for_timeout(1500)
-    try:
-        await browser.page.wait_for_load_state("networkidle", timeout=5000)
-    except Exception:
-        pass  # Continue even if timeout
+            # Clear the input first
+            try:
+                await browser.page.fill(selector, "", timeout=2000)
+            except Exception:
+                pass  # Input might not be clearable
+
+            # Fill with the value
+            await browser.page.fill(selector, str(value), timeout=5000)
+            filled_fields.append(f"{selector}={value[:50]}{'...' if len(str(value)) > 50 else ''}")
+        except Exception as e:
+            error_msg = str(e)
+            if "timeout" in error_msg.lower() or "waiting" in error_msg.lower():
+                return f"Error: Element '{selector}' not found (timeout). Use exact selectors from page state."
+            return f"Error filling '{selector}': {e}"
+
+    # Submit if requested
+    if submit:
+        await browser.press_key("Enter")
+
+        # Wait for response
+        await browser.page.wait_for_timeout(1500)
+        try:
+            await browser.page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass  # Continue even if timeout
 
     # Get the response
     html = await browser.get_page_content()
-    url = browser.get_current_url()
 
     # Check for flag in response
     flag = detect_flag(html)
@@ -141,35 +168,15 @@ async def fill_input(selector: str, value: str) -> str:
     body_text = re.sub(r'<[^>]+>', ' ', html)
     body_text = ' '.join(body_text.split())
 
-    # Check if page changed and has no input elements
-    page_changed = url != original_url
-    has_inputs = False
-    try:
-        elements = await extract_interactive_elements(browser.page)
-        input_elements = [e for e in elements if e.get('tag') in ['input', 'textarea']]
-        has_inputs = len(input_elements) > 0
-    except Exception:
-        pass
-
-    # If page changed and has no inputs, navigate back automatically
-    navigated_back = False
-    if page_changed and not has_inputs:
-        try:
-            await browser.go_back()
-            await browser.page.wait_for_timeout(500)
-            navigated_back = True
-        except Exception:
-            pass
-
     # Build response with clear output indication
-    if body_text.strip():
-        output = f"Output: {body_text[:2000]}"  # Truncate very long outputs
-    else:
-        # Show raw HTML when body text is empty
-        output = f"Output: (empty - raw HTML: {html[:500]})"
+    filled_info = f"Filled: {', '.join(filled_fields)}"
+    submitted_info = " (submitted)" if submit else " (not submitted yet)"
 
-    if navigated_back:
-        return f"{output}\n(navigated back to input page)"
+    if body_text.strip():
+        output = f"{filled_info}{submitted_info}\nOutput: {body_text[:2000]}"
+    else:
+        output = f"{filled_info}{submitted_info}\nOutput: (empty - raw HTML: {html[:500]})"
+
     return output
 
 
@@ -546,6 +553,7 @@ def get_payload_suggestions(vuln_type: str) -> str:
             - 'lfi': Local File Inclusion
             - 'xss': Cross-Site Scripting
             - 'path_traversal': Directory Traversal
+            - 'sensitive_paths': Common sensitive files/directories to check
 
     Returns:
         Formatted payload suggestions with detection and exploitation payloads.
@@ -571,7 +579,7 @@ def get_payload_suggestions(vuln_type: str) -> str:
     payloads = get_payloads(vuln_type)
 
     if not payloads:
-        available = ["ssti", "sqli", "cmdi", "lfi", "xss", "path_traversal"]
+        available = ["ssti", "sqli", "cmdi", "lfi", "xss", "path_traversal", "sensitive_paths"]
         return f"Unknown vulnerability type: '{vuln_type}'. Available types: {', '.join(available)}"
 
     # Format payloads by category
@@ -654,6 +662,19 @@ def get_payload_suggestions(vuln_type: str) -> str:
         result_lines.append("  2. Try different event handlers")
         result_lines.append("  3. Look for cookie stealing opportunities")
 
+    elif vuln_type == "sensitive_paths":
+        result_lines.append("### Sensitive Paths to Try")
+        for p in payloads[:15]:
+            if isinstance(p, tuple):
+                result_lines.append(f"  - {p[0]}")
+            else:
+                result_lines.append(f"  - {p}")
+
+        result_lines.append("\n### Usage Tips")
+        result_lines.append("  1. Use navigate_to_url() to visit each path")
+        result_lines.append("  2. Check for flags, config files, or git exposure")
+        result_lines.append("  3. Common finds: robots.txt, .git/config, .env, /admin")
+
     else:
         # Generic format for other types
         result_lines.append("### Payloads")
@@ -683,16 +704,13 @@ REACT_TOOLS = [
     execute_javascript,
     submit_form,
     # Information gathering
-    get_page_state,
     check_for_flag,
-    get_page_source,
     get_cookies,
     get_local_storage,
     find_element_by_text,
     # RAG - Payload knowledge retrieval
     get_payload_suggestions,
     # Utility
-    try_sensitive_paths,
     request_human_help,
     # Visual (optional)
     analyze_page_visually,
