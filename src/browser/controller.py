@@ -33,6 +33,11 @@ class BrowserController:
         self.network_responses: list[dict[str, Any]] = []
         self.console_logs: list[str] = []
 
+        # Request interception state
+        self.intercepted_request: dict[str, Any] | None = None
+        self._intercept_enabled: bool = False
+        self._intercept_url_pattern: str | None = None
+
     async def initialize(self) -> None:
         """Initialize the browser and create a new page."""
         settings = get_settings()
@@ -562,3 +567,194 @@ class BrowserController:
     def get_console_logs(self) -> list[str]:
         """Get captured console logs."""
         return self.console_logs.copy()
+
+    async def capture_form_data(self) -> dict[str, Any] | None:
+        """
+        Automatically capture form data from the current page.
+        Called automatically during page state extraction.
+
+        Returns:
+            Dict with form action URL, method, and fields, or None if no form.
+        """
+        if not self.page:
+            return None
+
+        try:
+            # Get form details - find first form with fields
+            form_info = await self.page.evaluate("""
+                (function() {
+                    const forms = document.querySelectorAll('form');
+                    for (const form of forms) {
+                        const formData = new FormData(form);
+                        const fields = {};
+                        for (const [key, value] of formData.entries()) {
+                            fields[key] = value;
+                        }
+
+                        // Only return forms that have at least one field
+                        if (Object.keys(fields).length > 0) {
+                            return {
+                                action: form.action || window.location.href,
+                                method: (form.method || 'GET').toUpperCase(),
+                                fields: fields
+                            };
+                        }
+                    }
+                    return null;
+                })()
+            """)
+
+            if not form_info:
+                self.intercepted_request = None
+                return None
+
+            # Store the intercepted request data
+            self.intercepted_request = {
+                "url": form_info["action"],
+                "method": form_info["method"],
+                "fields": form_info["fields"],
+            }
+
+            return self.intercepted_request
+
+        except Exception as e:
+            log_error(f"Form capture failed: {e}")
+            return None
+
+    async def send_modified_request(
+        self,
+        remove_fields: list[str] | None = None,
+        modify_fields: dict[str, str] | None = None,
+        add_fields: dict[str, str] | None = None,
+    ) -> str:
+        """
+        Send a modified version of the intercepted request.
+
+        Args:
+            remove_fields: List of field names to remove from the request.
+            modify_fields: Dict of field names to new values.
+            add_fields: Dict of new fields to add.
+
+        Returns:
+            Response text from the modified request.
+        """
+        if not self.page:
+            return "Error: Browser not initialized"
+
+        if not self.intercepted_request:
+            return "Error: No form data captured. Make sure there is a form on the page with fields."
+
+        try:
+            # Start with the original fields
+            fields = dict(self.intercepted_request["fields"])
+
+            # Remove specified fields
+            if remove_fields:
+                for field in remove_fields:
+                    if field in fields:
+                        del fields[field]
+                        log_action("Field removed", f"Removed: {field}")
+
+            # Modify specified fields
+            if modify_fields:
+                for field, value in modify_fields.items():
+                    fields[field] = value
+                    log_action("Field modified", f"{field}={value}")
+
+            # Add new fields
+            if add_fields:
+                for field, value in add_fields.items():
+                    fields[field] = value
+                    log_action("Field added", f"{field}={value}")
+
+            url = self.intercepted_request["url"]
+            method = self.intercepted_request["method"]
+
+            # Build the request body
+            if method == "POST":
+                # Use JavaScript fetch to send the modified request
+                js_code = f"""
+                    (async function() {{
+                        const formData = new URLSearchParams();
+                        const fields = {fields};
+                        for (const [key, value] of Object.entries(fields)) {{
+                            formData.append(key, value);
+                        }}
+
+                        try {{
+                            const response = await fetch('{url}', {{
+                                method: 'POST',
+                                headers: {{
+                                    'Content-Type': 'application/x-www-form-urlencoded',
+                                }},
+                                body: formData.toString(),
+                                credentials: 'include'
+                            }});
+
+                            // Get response info
+                            const text = await response.text();
+                            return {{
+                                status: response.status,
+                                url: response.url,
+                                body: text
+                            }};
+                        }} catch (e) {{
+                            return {{ error: e.toString() }};
+                        }}
+                    }})()
+                """
+            else:
+                # GET request with query params
+                js_code = f"""
+                    (async function() {{
+                        const params = new URLSearchParams();
+                        const fields = {fields};
+                        for (const [key, value] of Object.entries(fields)) {{
+                            params.append(key, value);
+                        }}
+
+                        const url = '{url}' + '?' + params.toString();
+
+                        try {{
+                            const response = await fetch(url, {{
+                                method: 'GET',
+                                credentials: 'include'
+                            }});
+
+                            const text = await response.text();
+                            return {{
+                                status: response.status,
+                                url: response.url,
+                                body: text
+                            }};
+                        }} catch (e) {{
+                            return {{ error: e.toString() }};
+                        }}
+                    }})()
+                """
+
+            result = await self.page.evaluate(js_code)
+
+            if "error" in result:
+                return f"Error sending request: {result['error']}"
+
+            # Navigate to the result page if it's different
+            if result.get("url") and result["url"] != self.page.url:
+                await self.page.goto(result["url"], wait_until="domcontentloaded")
+
+            # Clear the intercepted request
+            self.intercepted_request = None
+
+            log_action("Modified request sent", f"Status: {result.get('status')}, URL: {result.get('url')}")
+
+            # Return a summary with response body
+            body = result.get("body", "")
+            return f"Request sent. Status: {result.get('status')}\nResponse: {body[:2000]}"
+
+        except Exception as e:
+            log_error(f"Modified request failed: {e}")
+            return f"Error sending modified request: {e}"
+
+    def get_intercepted_request(self) -> dict[str, Any] | None:
+        """Get the currently intercepted request data."""
+        return self.intercepted_request

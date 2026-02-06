@@ -91,6 +91,9 @@ class CTFOrchestrator:
         cookies = await self.browser.get_cookies()
         local_storage = await self.browser.get_local_storage()
 
+        # Auto-capture form data for interception
+        intercepted_request = await self.browser.capture_form_data()
+
         log_observation(f"Page: {url} | {len(elements)} elements, {len(hints)} hints")
 
         return {
@@ -101,6 +104,7 @@ class CTFOrchestrator:
             "cookies": cookies,
             "local_storage": local_storage,
             "forms": forms,
+            "intercepted_request": intercepted_request,
         }
 
     async def _reason_node(self, state: AgentState) -> dict:
@@ -179,6 +183,7 @@ class CTFOrchestrator:
             cookies=page_state.get("cookies", []),
             iteration=iteration,
             max_iterations=state["max_iterations"],
+            intercepted_request=page_state.get("intercepted_request"),
         )
 
         # Build messages for LLM

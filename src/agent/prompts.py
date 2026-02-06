@@ -50,8 +50,15 @@ IMPORTANT: After writing your reasoning, you MUST actually invoke the tool - do 
 ### Payload Knowledge (RAG)
 - `get_payload_suggestions(vuln_type)` - Retrieve payload suggestions for a vulnerability type
   - ONLY use when you have identified a specific vulnerability type
-  - Available types: ssti, sqli, cmdi, lfi, xss, path_traversal, sensitive_paths
+  - Available types: ssti, sqli, cmdi, lfi, xss, path_traversal, sensitive_paths, 2fa_bypass
   - Returns detection and exploitation payloads
+
+### Request Interception (like Burp Suite)
+Form data is **auto-captured** and shown in the "Intercepted Request" section of page state.
+- `send_intercepted_request(remove_fields, modify_fields)` - Send the captured request with changes
+  - remove_fields: List of field names to REMOVE from the request
+  - modify_fields: Dict of fields to CHANGE values
+  - **Key technique**: Remove fields entirely to bypass validation checks!
 
 ## Critical Rules
 
@@ -75,6 +82,36 @@ Flags typically look like: `flag{...}`, `CTF{...}`, `picoCTF{...}`, `HTB{...}`, 
 Remember: Each fill_input submits the form and shows you the OUTPUT. Read it carefully!"""
 
 
+def _format_intercepted_request(intercepted_request: dict[str, Any] | None) -> str:
+    """Format intercepted request data for display in context."""
+    if not intercepted_request:
+        return ""
+
+    fields = intercepted_request.get("fields", {})
+    if not fields:
+        return ""
+
+    lines = [
+        "",
+        "### Intercepted Request (auto-captured form data)",
+        f"**URL**: {intercepted_request.get('url', 'unknown')}",
+        f"**Method**: {intercepted_request.get('method', 'POST')}",
+        "**Fields that will be sent**:",
+    ]
+
+    for field_name, field_value in fields.items():
+        # Truncate long values
+        display_value = str(field_value)[:50]
+        if len(str(field_value)) > 50:
+            display_value += "..."
+        lines.append(f"  - {field_name}: {display_value}")
+
+    lines.append("")
+    lines.append("Use `send_intercepted_request(remove_fields, modify_fields)` to send with modifications.")
+
+    return "\n".join(lines)
+
+
 def _detect_vuln_from_title(title: str) -> str | None:
     """Detect vulnerability type from page title."""
     title_lower = title.lower()
@@ -91,6 +128,8 @@ def _detect_vuln_from_title(title: str) -> str | None:
         return "cmdi"
     if "traversal" in title_lower or "path" in title_lower:
         return "path_traversal"
+    if "2fa" in title_lower or "otp" in title_lower or "mfa" in title_lower:
+        return "2fa_bypass"
 
     return None
 
@@ -104,6 +143,7 @@ def format_page_context(
     cookies: list[dict[str, Any]],
     iteration: int,
     max_iterations: int,
+    intercepted_request: dict[str, Any] | None = None,
 ) -> str:
     """
     Format the current page state and action history as context for the agent.
@@ -172,7 +212,7 @@ Based on page title "{title}", this appears to be a **{detected_vuln.upper()}** 
 
 ### Cookies
 {chr(10).join(f'- {c.get("name")}={c.get("value", "")[:50]}' for c in cookies[:5]) if cookies else 'None'}
-
+{_format_intercepted_request(intercepted_request)}
 ---
 {"**NOTE**: This page has NO interactive elements. If you need to submit more payloads, use `go_back()` to return to the previous page with the input form." if not visible_elements else ""}
 Based on the current page state, decide what to do next. Call exactly ONE tool."""

